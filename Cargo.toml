@@ -1,0 +1,16 @@
+[package]
+name = "memcache"
+version = "0.1.0"
+edition = "2024"
+description = "High-performance async memcached client (text + binary protocol) for the byMesh sidecar path"
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
+bytes = "1"
+deadpool = { version = "0.13", features = ["managed", "rt_tokio_1"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
