@@ -34,6 +34,10 @@ pub struct Config {
     pub endpoint: Endpoint,
     /// Protocol to speak.
     pub protocol: Protocol,
+    /// Namespace used to identify this client in logs (matches the mesh
+    /// `namespace`). Empty by default; set by [`Config::mesh`] or
+    /// [`Config::with_namespace`].
+    pub namespace: String,
     /// Maximum number of pooled connections.
     pub max_connections: usize,
     /// Timeout for establishing a new connection.
@@ -105,7 +109,7 @@ impl Config {
     /// Like [`Config::mesh`] but scans `dir` instead of the default directory.
     pub fn mesh_in(dir: impl AsRef<Path>, group: &str, namespace: &str) -> Result<Self> {
         let endpoint = mesh::discover(dir.as_ref(), group, namespace)?;
-        Ok(Self::new(endpoint))
+        Ok(Self::new(endpoint).with_namespace(namespace))
     }
 
     /// Build a config from an [`Endpoint`] with default pool/timeout settings.
@@ -113,6 +117,7 @@ impl Config {
         Config {
             endpoint,
             protocol: Protocol::default(),
+            namespace: String::new(),
             max_connections: 64,
             connect_timeout: Duration::from_millis(500),
             op_timeout: Duration::from_millis(400),
@@ -125,6 +130,12 @@ impl Config {
     /// Select the wire protocol.
     pub fn with_protocol(mut self, protocol: Protocol) -> Self {
         self.protocol = protocol;
+        self
+    }
+
+    /// Set the namespace used to identify this client in logs.
+    pub fn with_namespace(mut self, namespace: impl Into<String>) -> Self {
+        self.namespace = namespace.into();
         self
     }
 

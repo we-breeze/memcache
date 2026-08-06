@@ -448,3 +448,55 @@ async fn text_protocol_crud() {
 async fn binary_protocol_crud() {
     run_crud_suite(Protocol::Binary).await;
 }
+
+/// A `MakeWriter` that appends all log output into a shared buffer.
+#[derive(Clone)]
+struct BufWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for BufWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+    type Writer = BufWriter;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn logs_error_in_mesh_format_on_request_failure() {
+    use std::time::Duration;
+
+    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(BufWriter(buf.clone()))
+        .with_ansi(false)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // Nothing is listening on port 1, so the request fails during connect.
+    let client = Client::new(
+        Config::tcp("127.0.0.1", 1)
+            .with_namespace("nstest")
+            .with_max_connections(1)
+            .with_connect_timeout(Duration::from_millis(100))
+            .with_op_timeout(Duration::from_millis(100)),
+    )
+    .unwrap();
+
+    let result = client.get("kx").await;
+    assert!(result.is_err());
+
+    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+    assert!(
+        logged.contains("mc mesh get error ,namespace:nstest ,key: kx"),
+        "unexpected log output: {logged}"
+    );
+}

@@ -133,6 +133,19 @@ untagged) and for `i32` / `i64` / `u64` / `bool` (tagged with the Java marker
 bits). `Value` offers `as_bytes` / `as_string` / `as_i64` / `as_u64` / `as_bool`
 decoders.
 
+## Logging
+
+Request exceptions are logged at `error` level via [`tracing`], matching the
+mesh `MeshMemcacheTemplate` format:
+
+```text
+mc mesh <method> error ,namespace:<namespace> ,key: <key>
+```
+
+Set the namespace with `Config::with_namespace` (or `Config::mesh`, which sets
+it automatically) so the logs identify the client. Install any `tracing`
+subscriber to route these logs to your sink.
+
 ## Not implemented (out of scope)
 
 - Client-side multi-server sharding / consistent hashing / failover (the *byTcp*

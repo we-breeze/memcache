@@ -20,6 +20,10 @@ use crate::value::{CasValue, ToMemcacheValue, Value};
 /// variants, plus a few extras (`replace`/`append`/`prepend`/`incr`/`decr`/
 /// `touch`/`flush_all`/`version`). Every method transparently checks out a
 /// pooled connection and applies the configured per-operation timeout.
+///
+/// Request exceptions are logged at `error` level (via [`tracing`]), matching
+/// the mesh `MeshMemcacheTemplate` log format
+/// `mc mesh <method> error ,namespace:<ns> ,key: <key>`.
 #[derive(Clone)]
 pub struct Client {
     pool: Pool,
@@ -48,28 +52,38 @@ impl Client {
 
     /// Fetch a single value.
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
-        self.validate_key(key)?;
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.get(key)).await
+        self.run("get", key, async {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.get(key)).await
+        })
+        .await
     }
 
     /// Fetch multiple values in one round-trip. Missing keys are omitted.
     pub async fn get_multi(&self, keys: &[&str]) -> Result<HashMap<String, Value>> {
-        for key in keys {
-            self.validate_key(key)?;
-        }
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.get_multi(keys)).await
+        let key_desc = keys.join(",");
+        self.run("getMulti", &key_desc, async {
+            for key in keys {
+                self.validate_key(key)?;
+            }
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.get_multi(keys)).await
+        })
+        .await
     }
 
     /// Fetch a value together with its CAS token.
     pub async fn get_cas(&self, key: &str) -> Result<Option<CasValue>> {
-        self.validate_key(key)?;
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.get_cas(key)).await
+        self.run("getCas", key, async {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.get_cas(key)).await
+        })
+        .await
     }
 
     // --- writes ---
@@ -81,8 +95,12 @@ impl Client {
         value: impl ToMemcacheValue,
         expire: impl Into<Expiration>,
     ) -> Result<bool> {
-        self.store(StoreCommand::Set, key, value, expire, false)
-            .await
+        self.run(
+            "set",
+            key,
+            self.store(StoreCommand::Set, key, value, expire, false),
+        )
+        .await
     }
 
     /// Store a value without waiting for a reply (fire-and-forget on the text
@@ -93,9 +111,13 @@ impl Client {
         value: impl ToMemcacheValue,
         expire: impl Into<Expiration>,
     ) -> Result<()> {
-        self.store(StoreCommand::Set, key, value, expire, true)
-            .await
-            .map(|_| ())
+        self.run(
+            "setWithNoreply",
+            key,
+            self.store(StoreCommand::Set, key, value, expire, true),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Store only if the key does not already exist.
@@ -105,8 +127,12 @@ impl Client {
         value: impl ToMemcacheValue,
         expire: impl Into<Expiration>,
     ) -> Result<bool> {
-        self.store(StoreCommand::Add, key, value, expire, false)
-            .await
+        self.run(
+            "add",
+            key,
+            self.store(StoreCommand::Add, key, value, expire, false),
+        )
+        .await
     }
 
     /// Store only if the key already exists.
@@ -116,20 +142,32 @@ impl Client {
         value: impl ToMemcacheValue,
         expire: impl Into<Expiration>,
     ) -> Result<bool> {
-        self.store(StoreCommand::Replace, key, value, expire, false)
-            .await
+        self.run(
+            "replace",
+            key,
+            self.store(StoreCommand::Replace, key, value, expire, false),
+        )
+        .await
     }
 
     /// Append data to an existing value.
     pub async fn append(&self, key: &str, value: impl ToMemcacheValue) -> Result<bool> {
-        self.store(StoreCommand::Append, key, value, Expiration::Never, false)
-            .await
+        self.run(
+            "append",
+            key,
+            self.store(StoreCommand::Append, key, value, Expiration::Never, false),
+        )
+        .await
     }
 
     /// Prepend data to an existing value.
     pub async fn prepend(&self, key: &str, value: impl ToMemcacheValue) -> Result<bool> {
-        self.store(StoreCommand::Prepend, key, value, Expiration::Never, false)
-            .await
+        self.run(
+            "prepend",
+            key,
+            self.store(StoreCommand::Prepend, key, value, Expiration::Never, false),
+        )
+        .await
     }
 
     /// Compare-and-swap: store `value.value` only if the CAS token still matches.
@@ -139,67 +177,92 @@ impl Client {
         value: &CasValue,
         expire: impl Into<Expiration>,
     ) -> Result<bool> {
-        self.validate_key(key)?;
         let expire = expire.into();
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.cas(key, &value.value, expire, value.cas, false))
-            .await
+        self.run("cas", key, async move {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.cas(key, &value.value, expire, value.cas, false))
+                .await
+        })
+        .await
     }
 
     /// Delete a key. Returns `true` if the key existed.
     pub async fn delete(&self, key: &str) -> Result<bool> {
-        self.validate_key(key)?;
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.delete(key, false)).await
+        self.run("delete", key, async {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.delete(key, false)).await
+        })
+        .await
     }
 
     /// Delete a key without waiting for a reply.
     pub async fn delete_with_noreply(&self, key: &str) -> Result<()> {
-        self.validate_key(key)?;
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.delete(key, true)).await.map(|_| ())
+        self.run("deleteWithNoreply", key, async {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.delete(key, true)).await
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Atomically increment a counter. Returns `None` if the key is missing.
     pub async fn incr(&self, key: &str, delta: u64) -> Result<Option<u64>> {
-        self.validate_key(key)?;
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.incr_decr(true, key, delta, false)).await
+        self.run("incr", key, async {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.incr_decr(true, key, delta, false)).await
+        })
+        .await
     }
 
     /// Atomically decrement a counter. Returns `None` if the key is missing.
     pub async fn decr(&self, key: &str, delta: u64) -> Result<Option<u64>> {
-        self.validate_key(key)?;
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.incr_decr(false, key, delta, false)).await
+        self.run("decr", key, async {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.incr_decr(false, key, delta, false)).await
+        })
+        .await
     }
 
     /// Update a key's expiration without fetching its value.
     pub async fn touch(&self, key: &str, expire: impl Into<Expiration>) -> Result<bool> {
-        self.validate_key(key)?;
         let expire = expire.into();
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.touch(key, expire)).await
+        self.run("touch", key, async move {
+            self.validate_key(key)?;
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.touch(key, expire)).await
+        })
+        .await
     }
 
     /// Invalidate all items on the server.
     pub async fn flush_all(&self) -> Result<()> {
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.flush_all()).await
+        self.run("flushAll", "", async {
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.flush_all()).await
+        })
+        .await
     }
 
     /// Query the server version string.
     pub async fn version(&self) -> Result<String> {
-        let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.version()).await
+        self.run("version", "", async {
+            let mut obj = self.pool.get().await?;
+            let conn = &mut *obj;
+            self.timed(conn.version()).await
+        })
+        .await
     }
 
     // --- internals ---
@@ -219,6 +282,26 @@ impl Client {
         let conn = &mut *obj;
         self.timed(conn.store(command, key, &value, expire, noreply))
             .await
+    }
+
+    /// Run `op`, logging any error at `error` level in the mesh log format.
+    async fn run<T>(
+        &self,
+        method: &str,
+        key: &str,
+        op: impl Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let result = op.await;
+        if let Err(ref err) = result {
+            tracing::error!(
+                error = %err,
+                "mc mesh {} error ,namespace:{} ,key: {}",
+                method,
+                self.config.namespace,
+                key
+            );
+        }
+        result
     }
 
     /// Await `fut` under the configured per-operation timeout.
