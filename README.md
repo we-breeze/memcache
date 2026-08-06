@@ -68,6 +68,40 @@ let text = Config::tcp("127.0.0.1", 11211).with_protocol(Protocol::Text);
 let uds  = Config::unix("/var/run/mc.sock").with_protocol(Protocol::Binary);
 ```
 
+## byMesh: connecting via the socks registry
+
+In the mesh deployment the sidecar advertises each backend as a registry file
+under `/tmp/breeze/socks/` (`DEFAULT_SOCKS_DIR`). For memcached the file name is:
+
+```text
+config.example.com+3+config+v1+<group>+all:<namespace>@mc:<port>@cs
+```
+
+The SDK parses this name **directly** — no remote/vintage fetch. Parsing follows
+breeze's `context::Quadruple`: split the name by `@` into `service@protocol@backend`,
+then split the protocol by `:`; a numeric port means TCP `127.0.0.1:<port>`,
+otherwise it is a sibling `<token>.sock` unix socket.
+
+```rust
+use memcache::Config;
+
+// Parse a specific sock file directly (full path or bare name):
+let a = Config::sock(
+    "/tmp/breeze/socks/config.example.com+3+config+v1+\
+     cache.service.friendship.pool.yf+all:relation_cluster_exposure@mc:9461@cs",
+)?;
+
+// Or discover it by group + namespace under the default socks dir:
+let b = Config::mesh("cache.service.friendship.pool.yf", "relation_cluster_exposure")?;
+
+// Custom socks directory:
+let c = Config::mesh_in("/data1/breeze/socks", "grp", "ns")?;
+# Ok::<(), memcache::Error>(())
+```
+
+These constructors default to the binary protocol, matching the mesh
+`PingPongMemcachedBinaryClient`.
+
 ## API
 
 The client exposes the `CacheAble`-equivalent surface plus a few extras:

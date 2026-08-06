@@ -19,6 +19,10 @@ pub enum Error {
     #[error("connection pool error: {0}")]
     Pool(String),
 
+    /// Could not locate a mesh endpoint in the socks registry directory.
+    #[error("mesh discovery: {0}")]
+    MeshDiscovery(String),
+
     /// An operation exceeded the configured timeout.
     #[error("operation timed out")]
     Timeout,

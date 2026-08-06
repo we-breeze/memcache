@@ -1,5 +1,8 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+use crate::error::{Error, Result};
+use crate::mesh;
 
 /// Wire protocol spoken to the memcached endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -63,6 +66,46 @@ impl Config {
     /// Build a config for a unix domain socket with sensible defaults.
     pub fn unix(path: impl Into<PathBuf>) -> Self {
         Self::new(Endpoint::Unix { path: path.into() })
+    }
+
+    /// Build a config by **directly parsing** a mesh socks registry file
+    /// (byMesh path). The file name encodes the endpoint, e.g.
+    /// `…+<group>+all:<namespace>@mc:<port>@cs`; it is parsed in place with no
+    /// remote/vintage fetch. A numeric port yields a TCP endpoint to
+    /// `127.0.0.1:<port>`; otherwise a sibling `<token>.sock` unix socket.
+    ///
+    /// `path` may be the full path to the file or just its name (resolved
+    /// against [`mesh::DEFAULT_SOCKS_DIR`]). Defaults to the binary protocol,
+    /// matching the mesh `PingPong` client.
+    pub fn sock(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let (dir, name) = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => (parent, name),
+            (_, Some(name)) => (Path::new(mesh::DEFAULT_SOCKS_DIR), name),
+            _ => {
+                return Err(Error::MeshDiscovery(format!(
+                    "sock path has no file name: {}",
+                    path.display()
+                )));
+            }
+        };
+        let name = name
+            .to_str()
+            .ok_or_else(|| Error::MeshDiscovery("sock file name is not UTF-8".into()))?;
+        Ok(Self::new(mesh::endpoint_from_name(dir, name)?))
+    }
+
+    /// Discover the mesh memcached endpoint for `group`/`namespace` by scanning
+    /// the default socks directory ([`mesh::DEFAULT_SOCKS_DIR`]). Local file
+    /// access only — no remote fetch.
+    pub fn mesh(group: &str, namespace: &str) -> Result<Self> {
+        Self::mesh_in(mesh::DEFAULT_SOCKS_DIR, group, namespace)
+    }
+
+    /// Like [`Config::mesh`] but scans `dir` instead of the default directory.
+    pub fn mesh_in(dir: impl AsRef<Path>, group: &str, namespace: &str) -> Result<Self> {
+        let endpoint = mesh::discover(dir.as_ref(), group, namespace)?;
+        Ok(Self::new(endpoint))
     }
 
     /// Build a config from an [`Endpoint`] with default pool/timeout settings.
