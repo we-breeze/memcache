@@ -202,12 +202,9 @@ impl Connection {
         key: &str,
         value: &Value,
         expire: Expiration,
-        noreply: bool,
     ) -> Result<bool> {
         match self.protocol {
-            Protocol::Text => text::store(self, command, key, value, expire, noreply).await,
-            // The binary path always reads the reply (the mesh sidecar handles
-            // fire-and-forget semantics), so `noreply` is a normal store.
+            Protocol::Text => text::store(self, command, key, value, expire).await,
             Protocol::Binary => binary::store(self, command, key, value, expire, None).await,
         }
     }
@@ -218,19 +215,18 @@ impl Connection {
         value: &Value,
         expire: Expiration,
         cas: u64,
-        noreply: bool,
     ) -> Result<bool> {
         match self.protocol {
-            Protocol::Text => text::cas(self, key, value, expire, cas, noreply).await,
+            Protocol::Text => text::cas(self, key, value, expire, cas).await,
             Protocol::Binary => {
                 binary::store(self, StoreCommand::Set, key, value, expire, Some(cas)).await
             }
         }
     }
 
-    pub(crate) async fn delete(&mut self, key: &str, noreply: bool) -> Result<bool> {
+    pub(crate) async fn delete(&mut self, key: &str) -> Result<bool> {
         match self.protocol {
-            Protocol::Text => text::delete(self, key, noreply).await,
+            Protocol::Text => text::delete(self, key).await,
             Protocol::Binary => binary::delete(self, key).await,
         }
     }
@@ -240,10 +236,9 @@ impl Connection {
         incr: bool,
         key: &str,
         delta: u64,
-        noreply: bool,
     ) -> Result<Option<u64>> {
         match self.protocol {
-            Protocol::Text => text::incr_decr(self, incr, key, delta, noreply).await,
+            Protocol::Text => text::incr_decr(self, incr, key, delta).await,
             Protocol::Binary => binary::incr_decr(self, incr, key, delta).await,
         }
     }

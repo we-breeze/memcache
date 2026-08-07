@@ -63,7 +63,6 @@ async fn handle_text(sock: tokio::net::TcpStream, store: Store) -> std::io::Resu
                 let key = tokens[1].to_string();
                 let flags: u32 = tokens[2].parse().unwrap();
                 let bytes: usize = tokens[4].parse().unwrap();
-                let noreply = tokens.last() == Some(&"noreply");
                 let mut data = vec![0u8; bytes + 2];
                 reader.read_exact(&mut data).await?;
                 data.truncate(bytes);
@@ -88,9 +87,7 @@ async fn handle_text(sock: tokio::net::TcpStream, store: Store) -> std::io::Resu
                 } else {
                     "NOT_STORED\r\n"
                 };
-                if !noreply {
-                    writer.write_all(reply.as_bytes()).await?;
-                }
+                writer.write_all(reply.as_bytes()).await?;
             }
             "cas" => {
                 let key = tokens[1].to_string();
@@ -150,17 +147,14 @@ async fn handle_text(sock: tokio::net::TcpStream, store: Store) -> std::io::Resu
             }
             "delete" => {
                 let key = tokens[1];
-                let noreply = tokens.last() == Some(&"noreply");
                 let removed = store.lock().await.remove(key).is_some();
-                if !noreply {
-                    writer
-                        .write_all(if removed {
-                            b"DELETED\r\n"
-                        } else {
-                            b"NOT_FOUND\r\n"
-                        })
-                        .await?;
-                }
+                writer
+                    .write_all(if removed {
+                        b"DELETED\r\n"
+                    } else {
+                        b"NOT_FOUND\r\n"
+                    })
+                    .await?;
             }
             cmd @ ("incr" | "decr") => {
                 let key = tokens[1];

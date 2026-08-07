@@ -22,7 +22,6 @@ pub(crate) async fn store(
     key: &str,
     value: &Value,
     expire: Expiration,
-    noreply: bool,
 ) -> Result<bool> {
     let mut buf = Vec::with_capacity(value.as_bytes().len() + 48);
     write!(
@@ -35,17 +34,11 @@ pub(crate) async fn store(
         value.as_bytes().len()
     )
     .expect("write to Vec is infallible");
-    if noreply {
-        buf.extend_from_slice(b" noreply");
-    }
     buf.extend_from_slice(b"\r\n");
     buf.extend_from_slice(value.as_bytes());
     buf.extend_from_slice(b"\r\n");
     conn.send(&buf).await?;
 
-    if noreply {
-        return Ok(true);
-    }
     parse_store_reply(conn).await
 }
 
@@ -55,7 +48,6 @@ pub(crate) async fn cas(
     value: &Value,
     expire: Expiration,
     cas: u64,
-    noreply: bool,
 ) -> Result<bool> {
     let mut buf = Vec::with_capacity(value.as_bytes().len() + 64);
     write!(
@@ -68,17 +60,11 @@ pub(crate) async fn cas(
         cas
     )
     .expect("write to Vec is infallible");
-    if noreply {
-        buf.extend_from_slice(b" noreply");
-    }
     buf.extend_from_slice(b"\r\n");
     buf.extend_from_slice(value.as_bytes());
     buf.extend_from_slice(b"\r\n");
     conn.send(&buf).await?;
 
-    if noreply {
-        return Ok(true);
-    }
     parse_store_reply(conn).await
 }
 
@@ -172,17 +158,10 @@ async fn read_values(conn: &mut Connection) -> Result<Vec<Entry>> {
     }
 }
 
-pub(crate) async fn delete(conn: &mut Connection, key: &str, noreply: bool) -> Result<bool> {
-    let mut request = format!("delete {key}");
-    if noreply {
-        request.push_str(" noreply");
-    }
-    request.push_str("\r\n");
+pub(crate) async fn delete(conn: &mut Connection, key: &str) -> Result<bool> {
+    let request = format!("delete {key}\r\n");
     conn.send(request.as_bytes()).await?;
 
-    if noreply {
-        return Ok(true);
-    }
     let line = conn.read_line().await?;
     let line = as_str(&line)?;
     match line {
@@ -198,19 +177,11 @@ pub(crate) async fn incr_decr(
     incr: bool,
     key: &str,
     delta: u64,
-    noreply: bool,
 ) -> Result<Option<u64>> {
     let verb = if incr { "incr" } else { "decr" };
-    let mut request = format!("{verb} {key} {delta}");
-    if noreply {
-        request.push_str(" noreply");
-    }
-    request.push_str("\r\n");
+    let request = format!("{verb} {key} {delta}\r\n");
     conn.send(request.as_bytes()).await?;
 
-    if noreply {
-        return Ok(None);
-    }
     let line = conn.read_line().await?;
     let line = as_str(&line)?;
     if line == "NOT_FOUND" {

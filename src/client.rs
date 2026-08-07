@@ -18,8 +18,8 @@ use crate::value::{CasValue, ToMemcacheValue, Value};
 /// An async memcached client backed by a bounded connection pool.
 ///
 /// The API mirrors breeze-sdk-core's `CacheAble` interface: `get` / `get_multi`
-/// / `set` / `add` / `get_cas` / `cas` / `delete` and their `*_with_noreply`
-/// variants, plus a few extras (`replace`/`append`/`prepend`/`incr`/`decr`/
+/// / `set` / `add` / `get_cas` / `cas` / `delete`, plus a few extras
+/// (`replace`/`append`/`prepend`/`incr`/`decr`/
 /// `touch`/`flush_all`/`version`). Every method transparently checks out a
 /// pooled connection and applies the configured per-operation timeout.
 ///
@@ -124,26 +124,9 @@ impl Client {
         self.run(
             "set",
             key,
-            self.store(StoreCommand::Set, key, value, expire, false),
+            self.store(StoreCommand::Set, key, value, expire),
         )
         .await
-    }
-
-    /// Store a value without waiting for a reply (fire-and-forget on the text
-    /// protocol; a normal store whose reply is discarded on the binary protocol).
-    pub async fn set_with_noreply(
-        &self,
-        key: &str,
-        value: impl ToMemcacheValue,
-        expire: impl Into<Expiration>,
-    ) -> Result<()> {
-        self.run(
-            "setWithNoreply",
-            key,
-            self.store(StoreCommand::Set, key, value, expire, true),
-        )
-        .await
-        .map(|_| ())
     }
 
     /// Store only if the key does not already exist.
@@ -156,7 +139,7 @@ impl Client {
         self.run(
             "add",
             key,
-            self.store(StoreCommand::Add, key, value, expire, false),
+            self.store(StoreCommand::Add, key, value, expire),
         )
         .await
     }
@@ -171,7 +154,7 @@ impl Client {
         self.run(
             "replace",
             key,
-            self.store(StoreCommand::Replace, key, value, expire, false),
+            self.store(StoreCommand::Replace, key, value, expire),
         )
         .await
     }
@@ -181,7 +164,7 @@ impl Client {
         self.run(
             "append",
             key,
-            self.store(StoreCommand::Append, key, value, Expiration::Never, false),
+            self.store(StoreCommand::Append, key, value, Expiration::Never),
         )
         .await
     }
@@ -191,7 +174,7 @@ impl Client {
         self.run(
             "prepend",
             key,
-            self.store(StoreCommand::Prepend, key, value, Expiration::Never, false),
+            self.store(StoreCommand::Prepend, key, value, Expiration::Never),
         )
         .await
     }
@@ -208,7 +191,7 @@ impl Client {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self
-                .timed(obj.cas(key, &value.value, expire, value.cas, false))
+                .timed(obj.cas(key, &value.value, expire, value.cas))
                 .await;
             Self::discard_on_error(obj, result)
         })
@@ -220,22 +203,10 @@ impl Client {
         self.run("delete", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.delete(key, false)).await;
+            let result = self.timed(obj.delete(key)).await;
             Self::discard_on_error(obj, result)
         })
         .await
-    }
-
-    /// Delete a key without waiting for a reply.
-    pub async fn delete_with_noreply(&self, key: &str) -> Result<()> {
-        self.run("deleteWithNoreply", key, async {
-            self.validate_key(key)?;
-            let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.delete(key, true)).await;
-            Self::discard_on_error(obj, result)
-        })
-        .await
-        .map(|_| ())
     }
 
     /// Atomically increment a counter. Returns `None` if the key is missing.
@@ -243,7 +214,7 @@ impl Client {
         self.run("incr", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.incr_decr(true, key, delta, false)).await;
+            let result = self.timed(obj.incr_decr(true, key, delta)).await;
             Self::discard_on_error(obj, result)
         })
         .await
@@ -254,7 +225,7 @@ impl Client {
         self.run("decr", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.incr_decr(false, key, delta, false)).await;
+            let result = self.timed(obj.incr_decr(false, key, delta)).await;
             Self::discard_on_error(obj, result)
         })
         .await
@@ -300,15 +271,12 @@ impl Client {
         key: &str,
         value: impl ToMemcacheValue,
         expire: impl Into<Expiration>,
-        noreply: bool,
     ) -> Result<bool> {
         self.validate_key(key)?;
         let value = value.to_memcache_value();
         let expire = expire.into();
         let mut obj = self.pool.get().await?;
-        let result = self
-            .timed(obj.store(command, key, &value, expire, noreply))
-            .await;
+        let result = self.timed(obj.store(command, key, &value, expire)).await;
         Self::discard_on_error(obj, result)
     }
 

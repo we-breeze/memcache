@@ -131,11 +131,11 @@ The client exposes the `CacheAble`-equivalent surface plus a few extras:
 | Method | Description |
 | --- | --- |
 | `get` / `get_multi` / `get_cas` | fetch value(s), optionally with CAS token |
-| `set` / `set_with_noreply` | store unconditionally |
+| `set` | store unconditionally |
 | `add` / `replace` | store if absent / if present |
 | `append` / `prepend` | extend an existing value |
 | `cas` | store only if the CAS token still matches |
-| `delete` / `delete_with_noreply` | remove a key |
+| `delete` | remove a key |
 | `incr` / `decr` | atomic counter update |
 | `touch` | update expiration only |
 | `flush_all` / `version` | server admin |
