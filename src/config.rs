@@ -46,11 +46,21 @@ pub struct Config {
     pub namespace: String,
     /// Maximum number of pooled connections.
     pub max_connections: usize,
-    /// Connections established eagerly at client startup, so the first
-    /// requests do not pay connection-establishment latency. The pool still
-    /// grows on demand beyond this, up to [`Config::max_connections`]; `0`
-    /// disables prewarming. Capped at the maximum.
-    pub initial_connections: usize,
+    /// Minimum number of pooled connections, established eagerly at startup
+    /// and kept topped up afterwards by a shared global maintenance task, so
+    /// requests never pay connection-establishment latency — including after
+    /// idle connections died or were drained by an endpoint change. `0`
+    /// disables prewarming and maintenance. Capped at
+    /// [`Config::max_connections`].
+    pub min_connections: usize,
+    /// Enable TCP keepalive on pooled connections (no-op for unix sockets).
+    /// Probes begin after [`Config::keepalive_interval`] of idleness, so
+    /// half-open connections to a crashed mesh are reaped by the kernel
+    /// instead of failing a request later.
+    pub tcp_keepalive: bool,
+    /// Idle time after which TCP keepalive probes start (and the interval
+    /// between probes).
+    pub keepalive_interval: Duration,
     /// Timeout for establishing a new connection.
     pub connect_timeout: Duration,
     /// Timeout applied to each individual operation (request + response).
@@ -162,7 +172,9 @@ impl Config {
             protocol: Protocol::default(),
             namespace: String::new(),
             max_connections: 128,
-            initial_connections: 5,
+            min_connections: 2,
+            tcp_keepalive: true,
+            keepalive_interval: Duration::from_secs(10),
             connect_timeout: Duration::from_millis(500),
             op_timeout: Duration::from_millis(400),
             pool_wait_timeout: Duration::from_millis(500),
@@ -189,9 +201,22 @@ impl Config {
         self
     }
 
-    /// Set how many connections are established eagerly at startup.
-    pub fn with_initial_connections(mut self, n: usize) -> Self {
-        self.initial_connections = n;
+    /// Set the minimum pool size: established at startup and maintained
+    /// afterwards by the shared background task.
+    pub fn with_min_connections(mut self, n: usize) -> Self {
+        self.min_connections = n;
+        self
+    }
+
+    /// Enable or disable TCP keepalive on pooled connections.
+    pub fn with_tcp_keepalive(mut self, enabled: bool) -> Self {
+        self.tcp_keepalive = enabled;
+        self
+    }
+
+    /// Set the TCP keepalive idle interval.
+    pub fn with_keepalive_interval(mut self, interval: Duration) -> Self {
+        self.keepalive_interval = interval;
         self
     }
 

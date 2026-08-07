@@ -11,6 +11,7 @@ use crate::config::{Config, Endpoint, MAX_KEY_LEN};
 use crate::discovery::DirectoryWatcher;
 use crate::error::{Error, Result};
 use crate::expiration::Expiration;
+use crate::maintenance::MaintenanceEntry;
 use crate::pool::{Manager, Pool, SharedEndpoint};
 use crate::protocol::StoreCommand;
 use crate::value::{CasValue, ToMemcacheValue, Value};
@@ -36,6 +37,12 @@ pub struct Client {
     /// from an explicit TCP/unix endpoint. Keeping it alive keeps the
     /// (shared, per-directory) scan task running.
     watcher: Option<Arc<DirectoryWatcher>>,
+    /// Registration with the global pool maintainer, which keeps the pool
+    /// topped up to `Config::min_connections`. Dropped with the client,
+    /// deregistering it from maintenance. Only kept for its lifetime
+    /// semantics; never read.
+    #[allow(dead_code)]
+    maintenance: Option<Arc<MaintenanceEntry>>,
 }
 
 impl Client {
@@ -64,28 +71,38 @@ impl Client {
             .mesh_discovery
             .as_ref()
             .map(|discovery| Arc::new(crate::discovery::watch(discovery.dir.clone())));
+        let maintenance = if config.min_connections > 0 {
+            let entry = Arc::new(MaintenanceEntry {
+                pool: pool.clone(),
+                min_connections: config.min_connections.min(config.max_connections),
+                namespace: config.namespace.clone(),
+            });
+            crate::maintenance::register(entry.clone());
+            Some(entry)
+        } else {
+            None
+        };
         let client = Client {
             pool,
             config,
             endpoint,
             watcher,
+            maintenance,
         };
         client.prewarm();
         client.spawn_endpoint_tracker();
         Ok(client)
     }
 
-    /// Eagerly establish [`Config::initial_connections`] pooled connections
-    /// so the first requests do not pay connection-establishment latency.
-    /// Each borrowed connection is returned to the pool immediately, leaving
-    /// them all idle. Failures are logged and swallowed: a mesh endpoint
-    /// that is briefly unavailable at startup must not prevent client
+    /// Eagerly establish [`Config::min_connections`] pooled connections so
+    /// the first requests do not pay connection-establishment latency. Each
+    /// borrowed connection is returned to the pool immediately, leaving them
+    /// all idle; the global maintenance task keeps the pool at this level
+    /// afterwards. Failures are logged and swallowed: a mesh endpoint that
+    /// is briefly unavailable at startup must not prevent client
     /// construction, since the pool creates connections lazily anyway.
     fn prewarm(&self) {
-        let n = self
-            .config
-            .initial_connections
-            .min(self.config.max_connections);
+        let n = self.config.min_connections.min(self.config.max_connections);
         if n == 0 {
             return;
         }
@@ -100,7 +117,7 @@ impl Client {
                         tracing::warn!(
                             error = %err,
                             namespace = %namespace,
-                            "mc mesh prewarm: failed to establish initial connection"
+                            "mc mesh prewarm: failed to establish connection"
                         );
                         break;
                     }

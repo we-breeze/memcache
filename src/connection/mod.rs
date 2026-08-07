@@ -92,6 +92,9 @@ impl Connection {
                 if config.tcp_nodelay {
                     let _ = stream.set_nodelay(true);
                 }
+                if config.tcp_keepalive {
+                    apply_keepalive(&stream, config);
+                }
                 Stream::Tcp(stream)
             }
             Endpoint::Unix { path } => {
@@ -262,6 +265,30 @@ impl Connection {
             Protocol::Text => text::version(self).await,
             Protocol::Binary => binary::version(self).await,
         }
+    }
+}
+
+/// Configure TCP keepalive on a connected stream via socket2, which (unlike
+/// tokio's API) can set the idle interval. Kept short because the mesh is
+/// local: a half-open connection is reaped after roughly
+/// `keepalive_interval` plus a few probe rounds instead of only surfacing
+/// when a request times out on it.
+#[cfg(unix)]
+fn apply_keepalive(stream: &TcpStream, config: &Config) {
+    use socket2::{SockRef, TcpKeepalive};
+    let keepalive = TcpKeepalive::new()
+        .with_time(config.keepalive_interval)
+        .with_interval(config.keepalive_interval);
+    let socket = SockRef::from(stream);
+    if let Err(err) = socket.set_tcp_keepalive(&keepalive) {
+        tracing::warn!(error = %err, "mc mesh: failed to set TCP keepalive");
+    }
+}
+
+#[cfg(not(unix))]
+fn apply_keepalive(stream: &TcpStream, _: &Config) {
+    if let Err(err) = stream.set_keepalive(true) {
+        tracing::warn!(error = %err, "mc mesh: failed to set TCP keepalive");
     }
 }
 

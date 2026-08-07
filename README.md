@@ -17,6 +17,10 @@ The public API mirrors breeze-sdk-core's `CacheAble` interface
   request/response correlation: the binary protocol matches each response to
   its request by opaque token, and connections that fail, time out, or show a
   desynced frame are dropped instead of being recycled.
+- Pool floor and liveness: a single shared background task keeps every client
+  topped up to `Config::min_connections` (not one task per client), and TCP
+  keepalive reaps half-open connections to a crashed mesh before they can
+  stall a request.
 - TCP (`host:port`) and unix-socket endpoints.
 - Per-operation timeouts and key validation.
 - Java-compatible value flag markers (int/long/bool/string), so values are
@@ -34,7 +38,7 @@ async fn main() -> memcache::Result<()> {
     let config = Config::tcp("127.0.0.1", 11211)
         .with_protocol(Protocol::Binary)
         .with_max_connections(128) // the default; pool grows to this on demand
-        .with_initial_connections(5) // the default; prewarmed at startup
+        .with_min_connections(2) // the default; established at startup, kept topped up
         .with_op_timeout(Duration::from_millis(400));
     let client = Client::new(config)?;
 

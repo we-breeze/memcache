@@ -12,6 +12,7 @@ deadpool = { version = "0.13", features = ["managed", "rt_tokio_1"] }
 thiserror = "2"
 tracing = "0.1"
 arc-swap = "1.9.2"
+socket2 = { version = "0.6.5", features = ["all"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

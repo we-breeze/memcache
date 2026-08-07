@@ -458,16 +458,16 @@ async fn text_protocol_crud() {
     run_crud_suite(Protocol::Text).await;
 }
 
-/// A client built with `initial_connections` prewarms the pool: shortly
-/// after construction the pool already holds that many idle connections,
-/// ready for the first requests.
+/// A client built with `min_connections` prewarms the pool: shortly after
+/// construction the pool already holds that many idle connections, ready for
+/// the first requests.
 #[tokio::test]
-async fn prewarms_initial_connections() {
+async fn prewarms_min_connections() {
     let port = spawn(Protocol::Binary).await;
     let client = Client::new(
         Config::tcp("127.0.0.1", port)
             .with_protocol(Protocol::Binary)
-            .with_initial_connections(5)
+            .with_min_connections(5)
             .with_max_connections(128),
     )
     .unwrap();
@@ -643,7 +643,14 @@ async fn mesh_rediscovery_follows_port_change() {
     let port_a = spawn(Protocol::Binary).await;
     std::fs::write(dir.path().join(sock_name(port_a)), []).unwrap();
 
-    let client = Client::new(Config::mesh_in(dir.path(), "grp", "nsX").unwrap()).unwrap();
+    let client = Client::new(
+        // Disable min-connection maintenance so the test observes the raw
+        // pool drain on endpoint change, not the maintainer refilling it.
+        Config::mesh_in(dir.path(), "grp", "nsX")
+            .unwrap()
+            .with_min_connections(0),
+    )
+    .unwrap();
     assert_eq!(
         client.current_endpoint(),
         Endpoint::Tcp {
@@ -669,7 +676,8 @@ async fn mesh_rediscovery_follows_port_change() {
         }
     );
 
-    // Requests now hit the new server (the old value is not there).
+    // Requests now hit the new server (the old value is not there). The
+    // first request establishes a fresh connection to the new endpoint.
     assert!(client.get("k").await.unwrap().is_none());
     client.set("k", "v2", 60u32).await.unwrap();
     assert_eq!(

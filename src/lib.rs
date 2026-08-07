@@ -30,6 +30,7 @@ mod connection;
 mod discovery;
 mod error;
 mod expiration;
+mod maintenance;
 mod mesh;
 mod pool;
 mod protocol;
