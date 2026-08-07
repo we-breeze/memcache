@@ -458,6 +458,36 @@ async fn text_protocol_crud() {
     run_crud_suite(Protocol::Text).await;
 }
 
+/// A client built with `initial_connections` prewarms the pool: shortly
+/// after construction the pool already holds that many idle connections,
+/// ready for the first requests.
+#[tokio::test]
+async fn prewarms_initial_connections() {
+    let port = spawn(Protocol::Binary).await;
+    let client = Client::new(
+        Config::tcp("127.0.0.1", port)
+            .with_protocol(Protocol::Binary)
+            .with_initial_connections(5)
+            .with_max_connections(128),
+    )
+    .unwrap();
+
+    // Prewarm runs in the background; poll briefly for the pool to fill.
+    let mut size = 0;
+    for _ in 0..200 {
+        size = client.pool_size();
+        if size >= 5 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert_eq!(size, 5, "pool should hold the 5 prewarmed connections");
+
+    // The pool still grows past the initial size on demand, up to max.
+    assert!(client.get("k").await.unwrap().is_none());
+    assert!(client.pool_size() >= 5);
+}
+
 #[tokio::test]
 async fn binary_protocol_crud() {
     run_crud_suite(Protocol::Binary).await;

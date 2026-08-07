@@ -33,7 +33,8 @@ async fn main() -> memcache::Result<()> {
     // Binary protocol over TCP (the default protocol is Binary).
     let config = Config::tcp("127.0.0.1", 11211)
         .with_protocol(Protocol::Binary)
-        .with_max_connections(64)
+        .with_max_connections(128) // the default; pool grows to this on demand
+        .with_initial_connections(5) // the default; prewarmed at startup
         .with_op_timeout(Duration::from_millis(400));
     let client = Client::new(config)?;
 

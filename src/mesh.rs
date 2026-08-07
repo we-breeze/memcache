@@ -54,6 +54,34 @@ impl ParsedSock {
 
 /// Parse a socks registry file name into a service + endpoint.
 ///
+/// Using the real registry file
+///
+/// ```text
+/// config.example.com+3+config+v1+cache.service.dm.pool.yf+all:dmx@mc:9300@cs
+/// ```
+///
+/// as a worked example, the name decomposes as:
+///
+/// ```text
+/// config.example.com+3+config+v1+cache.service.dm.pool.yf+all:dmx@mc:9300@cs
+/// |------------------------------------------------------------||------|--|
+///                          service                               proto  backend
+///
+/// service = config.example.com+3+config+v1+cache.service.dm.pool.yf+all:dmx
+///           |--------------------------------------------------|  |----|
+///           deployment prefix (domain+idc+service+version+group)  +all:<namespace>
+///           → group = "cache.service.dm.pool.yf", namespace = "dmx"
+///
+/// protocol = mc:9300
+///            |   |--- numeric port → TCP endpoint 127.0.0.1:9300
+///            |       (a non-numeric token `U_x` would mean the unix
+///            |        socket <dir>/U_x.sock)
+///            └----- "mc" marks a memcached entry
+///
+/// backend = cs (the mesh backend the connection goes through; not used
+///             for the local endpoint)
+/// ```
+///
 /// Returns `None` if the name does not have the expected `a@b@c` shape.
 fn parse_sock(dir: &Path, file_name: &str) -> Option<ParsedSock> {
     let fields: Vec<&str> = file_name.split('@').collect();
@@ -226,6 +254,27 @@ mod tests {
                 host: "127.0.0.1".to_string(),
                 port: 9461,
             }
+        );
+    }
+
+    #[test]
+    fn parses_real_registry_example() {
+        let sock =
+            parse("config.example.com+3+config+v1+cache.service.dm.pool.yf+all:dmx@mc:9300@cs");
+        assert_eq!(sock.protocol, "mc");
+        assert_eq!(
+            sock.endpoint,
+            Endpoint::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: 9300,
+            }
+        );
+        assert_eq!(
+            sock.key(),
+            Some(SockKey {
+                group: Some("cache.service.dm.pool.yf".to_string()),
+                namespace: "dmx".to_string(),
+            })
         );
     }
 

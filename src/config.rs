@@ -46,6 +46,11 @@ pub struct Config {
     pub namespace: String,
     /// Maximum number of pooled connections.
     pub max_connections: usize,
+    /// Connections established eagerly at client startup, so the first
+    /// requests do not pay connection-establishment latency. The pool still
+    /// grows on demand beyond this, up to [`Config::max_connections`]; `0`
+    /// disables prewarming. Capped at the maximum.
+    pub initial_connections: usize,
     /// Timeout for establishing a new connection.
     pub connect_timeout: Duration,
     /// Timeout applied to each individual operation (request + response).
@@ -156,7 +161,8 @@ impl Config {
             mesh_discovery: None,
             protocol: Protocol::default(),
             namespace: String::new(),
-            max_connections: 64,
+            max_connections: 128,
+            initial_connections: 5,
             connect_timeout: Duration::from_millis(500),
             op_timeout: Duration::from_millis(400),
             pool_wait_timeout: Duration::from_millis(500),
@@ -180,6 +186,12 @@ impl Config {
     /// Set the maximum number of pooled connections.
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
+        self
+    }
+
+    /// Set how many connections are established eagerly at startup.
+    pub fn with_initial_connections(mut self, n: usize) -> Self {
+        self.initial_connections = n;
         self
     }
 

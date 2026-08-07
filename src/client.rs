@@ -70,8 +70,46 @@ impl Client {
             endpoint,
             watcher,
         };
+        client.prewarm();
         client.spawn_endpoint_tracker();
         Ok(client)
+    }
+
+    /// Eagerly establish [`Config::initial_connections`] pooled connections
+    /// so the first requests do not pay connection-establishment latency.
+    /// Each borrowed connection is returned to the pool immediately, leaving
+    /// them all idle. Failures are logged and swallowed: a mesh endpoint
+    /// that is briefly unavailable at startup must not prevent client
+    /// construction, since the pool creates connections lazily anyway.
+    fn prewarm(&self) {
+        let n = self
+            .config
+            .initial_connections
+            .min(self.config.max_connections);
+        if n == 0 {
+            return;
+        }
+        let pool = self.pool.clone();
+        let namespace = self.config.namespace.clone();
+        tokio::spawn(async move {
+            let mut conns = Vec::with_capacity(n);
+            for _ in 0..n {
+                match pool.get().await {
+                    Ok(conn) => conns.push(conn),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            namespace = %namespace,
+                            "mc mesh prewarm: failed to establish initial connection"
+                        );
+                        break;
+                    }
+                }
+            }
+            // Dropping the borrowed objects returns the connections to the
+            // pool, where they stay idle and ready.
+            drop(conns);
+        });
     }
 
     // --- reads ---
@@ -368,6 +406,11 @@ impl Client {
             .read()
             .expect("endpoint lock poisoned")
             .clone()
+    }
+
+    /// Number of connections currently in the pool (idle + in use).
+    pub fn pool_size(&self) -> usize {
+        self.pool.status().size
     }
 
     /// Rescan the mesh registry and, if the advertised endpoint changed,
