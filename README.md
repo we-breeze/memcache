@@ -13,7 +13,10 @@ The public API mirrors breeze-sdk-core's `CacheAble` interface
 
 - `async` / [Tokio](https://tokio.rs) throughout, built on [`bytes`](https://docs.rs/bytes).
 - Text **and** binary protocols, selectable per client.
-- Connection pooling via [`deadpool`](https://docs.rs/deadpool) with health-checked recycling.
+- Connection pooling via [`deadpool`](https://docs.rs/deadpool) with
+  request/response correlation: the binary protocol matches each response to
+  its request by opaque token, and connections that fail, time out, or show a
+  desynced frame are dropped instead of being recycled.
 - TCP (`host:port`) and unix-socket endpoints.
 - Per-operation timeouts and key validation.
 - Java-compatible value flag markers (int/long/bool/string), so values are

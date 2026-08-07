@@ -39,6 +39,12 @@ pub enum Error {
     #[error("protocol error: {0}")]
     Protocol(String),
 
+    /// The connection is out of sync: a response frame did not match the
+    /// request that was sent (e.g. a leftover frame from a timed-out
+    /// operation). The connection must be dropped, not reused.
+    #[error("desynced connection: {0}")]
+    Desynced(String),
+
     /// The key was empty, too long, or contained control/space characters.
     #[error("invalid key: {0}")]
     InvalidKey(&'static str),

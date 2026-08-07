@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use deadpool::managed::{self, Metrics, RecycleError, RecycleResult};
+use deadpool::managed::{self, Metrics, RecycleResult};
 
 use crate::config::Config;
 use crate::connection::Connection;
@@ -26,11 +26,15 @@ impl managed::Manager for Manager {
     }
 
     async fn recycle(&self, conn: &mut Connection, _: &Metrics) -> RecycleResult<Error> {
-        // A successful VERSION round-trip proves the connection is still usable.
-        conn.version()
-            .await
-            .map(|_| ())
-            .map_err(RecycleError::Backend)
+        // No VERSION probe: connection health is established by the
+        // request/response correlation itself. The binary protocol matches
+        // each response to its request by opaque token (a mismatch surfaces as
+        // `Error::Desynced`), and `Client` explicitly drops any connection
+        // that fails or times out instead of returning it to the pool. A
+        // probe here would add a full round-trip to every operation for no
+        // additional safety.
+        let _ = conn;
+        Ok(())
     }
 }
 

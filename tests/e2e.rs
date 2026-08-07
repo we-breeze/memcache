@@ -213,7 +213,15 @@ async fn handle_text(sock: tokio::net::TcpStream, store: Store) -> std::io::Resu
 const REQ: u8 = 0x80;
 const RESP: u8 = 0x81;
 
-fn frame(opcode: u8, status: u16, extras: &[u8], key: &[u8], value: &[u8], cas: u64) -> Vec<u8> {
+fn frame(
+    opcode: u8,
+    status: u16,
+    extras: &[u8],
+    key: &[u8],
+    value: &[u8],
+    opaque: u32,
+    cas: u64,
+) -> Vec<u8> {
     let body = extras.len() + key.len() + value.len();
     let mut buf = Vec::with_capacity(24 + body);
     buf.push(RESP);
@@ -223,7 +231,7 @@ fn frame(opcode: u8, status: u16, extras: &[u8], key: &[u8], value: &[u8], cas: 
     buf.push(0);
     buf.extend_from_slice(&status.to_be_bytes());
     buf.extend_from_slice(&(body as u32).to_be_bytes());
-    buf.extend_from_slice(&[0, 0, 0, 0]); // opaque echoed as 0 for simplicity
+    buf.extend_from_slice(&opaque.to_be_bytes());
     buf.extend_from_slice(&cas.to_be_bytes());
     buf.extend_from_slice(extras);
     buf.extend_from_slice(key);
@@ -243,6 +251,7 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
         let key_len = u16::from_be_bytes([header[2], header[3]]) as usize;
         let extras_len = header[4] as usize;
         let body_len = u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+        let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
         let cas = u64::from_be_bytes(header[16..24].try_into().unwrap());
         let mut body = vec![0u8; body_len];
         sock.read_exact(&mut body).await?;
@@ -272,11 +281,11 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
                             cas: cas_counter,
                         },
                     );
-                    frame(opcode, 0x0000, &[], &[], &[], cas_counter)
+                    frame(opcode, 0x0000, &[], &[], &[], opaque, cas_counter)
                 } else if !cas_ok {
-                    frame(opcode, 0x0002, &[], &[], b"exists", 0)
+                    frame(opcode, 0x0002, &[], &[], b"exists", opaque, 0)
                 } else {
-                    frame(opcode, 0x0005, &[], &[], b"not stored", 0)
+                    frame(opcode, 0x0005, &[], &[], b"not stored", opaque, 0)
                 }
             }
             0x00 => {
@@ -289,9 +298,10 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
                         &item.flags.to_be_bytes(),
                         &[],
                         &item.data,
+                        opaque,
                         item.cas,
                     ),
-                    None => frame(opcode, 0x0001, &[], &[], b"not found", 0),
+                    None => frame(opcode, 0x0001, &[], &[], b"not found", opaque, 0),
                 }
             }
             0x0D => {
@@ -304,18 +314,19 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
                         &item.flags.to_be_bytes(),
                         key.as_bytes(),
                         &item.data,
+                        opaque,
                         item.cas,
                     ),
                     None => Vec::new(),
                 }
             }
-            0x0A => frame(0x0A, 0x0000, &[], &[], &[], 0), // noop fence
+            0x0A => frame(0x0A, 0x0000, &[], &[], &[], opaque, 0), // noop fence
             0x04 => {
                 let removed = store.lock().await.remove(&key).is_some();
                 if removed {
-                    frame(opcode, 0x0000, &[], &[], &[], 0)
+                    frame(opcode, 0x0000, &[], &[], &[], opaque, 0)
                 } else {
-                    frame(opcode, 0x0001, &[], &[], b"not found", 0)
+                    frame(opcode, 0x0001, &[], &[], b"not found", opaque, 0)
                 }
             }
             0x05 | 0x06 => {
@@ -323,7 +334,7 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
                 let delta = u64::from_be_bytes(extras[0..8].try_into().unwrap());
                 let mut map = store.lock().await;
                 match map.get_mut(&key) {
-                    None => frame(opcode, 0x0001, &[], &[], b"not found", 0),
+                    None => frame(opcode, 0x0001, &[], &[], b"not found", opaque, 0),
                     Some(item) => {
                         let current: u64 = String::from_utf8_lossy(&item.data)
                             .trim()
@@ -335,7 +346,15 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
                             current.saturating_sub(delta)
                         };
                         item.data = next.to_string().into_bytes();
-                        frame(opcode, 0x0000, &[], &[], &next.to_be_bytes(), item.cas)
+                        frame(
+                            opcode,
+                            0x0000,
+                            &[],
+                            &[],
+                            &next.to_be_bytes(),
+                            opaque,
+                            item.cas,
+                        )
                     }
                 }
             }
@@ -347,15 +366,16 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
                     &[],
                     &[],
                     &[],
+                    opaque,
                     0,
                 )
             }
             0x08 => {
                 store.lock().await.clear();
-                frame(opcode, 0x0000, &[], &[], &[], 0)
+                frame(opcode, 0x0000, &[], &[], &[], opaque, 0)
             }
-            0x0B => frame(opcode, 0x0000, &[], &[], b"1.6.0-fake", 0),
-            _ => frame(opcode, 0x0081, &[], &[], b"unknown", 0),
+            0x0B => frame(opcode, 0x0000, &[], &[], b"1.6.0-fake", opaque, 0),
+            _ => frame(opcode, 0x0081, &[], &[], b"unknown", opaque, 0),
         };
         if !response.is_empty() {
             sock.write_all(&response).await?;
@@ -447,6 +467,143 @@ async fn text_protocol_crud() {
 #[tokio::test]
 async fn binary_protocol_crud() {
     run_crud_suite(Protocol::Binary).await;
+}
+
+/// Spawn a misbehaving binary server: for each connection it answers the
+/// first request normally, then injects one extra unsolicited GET response
+/// frame before answering every subsequent request. This simulates a late
+/// response frame left over from a timed-out operation. Returns the port.
+async fn spawn_desyncing_binary_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut answered = 0u32;
+                loop {
+                    let mut header = [0u8; 24];
+                    if sock.read_exact(&mut header).await.is_err() {
+                        return;
+                    }
+                    let key_len = u16::from_be_bytes([header[2], header[3]]) as usize;
+                    let extras_len = header[4] as usize;
+                    let body_len =
+                        u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+                    let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
+                    let mut body = vec![0u8; body_len];
+                    if sock.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    let _ = (key_len, extras_len);
+                    answered += 1;
+                    if answered > 1 {
+                        // Inject a leftover frame with a bogus opaque.
+                        let junk = frame(0x00, 0x0000, &[0; 4], &[], b"stale", 0xdead, 0);
+                        if sock.write_all(&junk).await.is_err() {
+                            return;
+                        }
+                    }
+                    // Answer every request with a well-formed GET miss.
+                    let response = frame(0x00, 0x0001, &[], &[], b"not found", opaque, 0);
+                    if sock.write_all(&response).await.is_err() {
+                        return;
+                    }
+                    let _ = sock.flush().await;
+                }
+            });
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn binary_desynced_frame_drops_connection() {
+    let port = spawn_desyncing_binary_server().await;
+    let client = Client::new(
+        Config::tcp("127.0.0.1", port)
+            .with_protocol(Protocol::Binary)
+            .with_max_connections(1),
+    )
+    .unwrap();
+
+    // First request: answered normally, connection goes back to the pool.
+    assert!(client.get("k").await.unwrap().is_none());
+    // Second request on the pooled connection hits the injected stale frame:
+    // the opaque mismatch must surface as a desync error...
+    let err = client.get("k").await.unwrap_err();
+    assert!(
+        matches!(err, memcache::Error::Desynced(_)),
+        "expected desync error, got {err:?}"
+    );
+    // ...and the poisoned connection must have been dropped, so the next
+    // request reconnects and succeeds (fresh connection: answered normally).
+    assert!(client.get("k").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn binary_timeout_drops_connection() {
+    use std::time::Duration;
+
+    // Server that accepts connections but never answers the first request;
+    // answers subsequent requests (on new connections) normally.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut conn_count = 0u32;
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            conn_count += 1;
+            let conn_no = conn_count;
+            tokio::spawn(async move {
+                loop {
+                    let mut header = [0u8; 24];
+                    if sock.read_exact(&mut header).await.is_err() {
+                        return;
+                    }
+                    let body_len =
+                        u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+                    let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
+                    let mut body = vec![0u8; body_len];
+                    if sock.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    if conn_no == 1 {
+                        // Never answer on the first connection: force a timeout.
+                        continue;
+                    }
+                    let response = frame(0x00, 0x0001, &[], &[], b"not found", opaque, 0);
+                    if sock.write_all(&response).await.is_err() {
+                        return;
+                    }
+                    let _ = sock.flush().await;
+                }
+            });
+        }
+    });
+
+    let client = Client::new(
+        Config::tcp("127.0.0.1", port)
+            .with_protocol(Protocol::Binary)
+            .with_max_connections(1)
+            .with_op_timeout(Duration::from_millis(100)),
+    )
+    .unwrap();
+
+    // First request times out; the connection must be dropped rather than
+    // returned to the pool with a (never-arriving) pending response.
+    let err = client.get("k").await.unwrap_err();
+    assert!(
+        matches!(err, memcache::Error::Timeout),
+        "expected timeout, got {err:?}"
+    );
+    // The next request must use a *new* connection (the second one the server
+    // answers) and succeed.
+    assert!(client.get("k").await.unwrap().is_none());
 }
 
 /// A `MakeWriter` that appends all log output into a shared buffer.

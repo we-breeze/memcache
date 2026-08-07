@@ -71,6 +71,10 @@ pub(crate) struct Connection {
     stream: Stream,
     protocol: Protocol,
     read_buf: BytesMut,
+    /// Opaque counter for binary-protocol requests, incremented per request so
+    /// a response can be matched to its request. Starts at 1 so the "no
+    /// correlation" value 0 stays distinguishable.
+    next_opaque: u32,
 }
 
 impl Connection {
@@ -101,7 +105,16 @@ impl Connection {
             stream,
             protocol: config.protocol,
             read_buf: BytesMut::with_capacity(4096),
+            next_opaque: 1,
         })
+    }
+
+    /// Allocate the opaque token for the next binary-protocol request.
+    pub(crate) fn next_opaque(&mut self) -> u32 {
+        let opaque = self.next_opaque;
+        // Wrap around without ever handing out 0.
+        self.next_opaque = self.next_opaque.wrapping_add(1).max(1);
+        opaque
     }
 
     // --- buffered IO primitives (used by protocol codecs) ---

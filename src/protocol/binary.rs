@@ -46,9 +46,9 @@ mod status {
 struct Response {
     opcode: u8,
     status: u16,
+    opaque: u32,
     cas: u64,
     extras: Bytes,
-    key: Bytes,
     value: Bytes,
 }
 
@@ -72,6 +72,22 @@ impl Response {
             status::VALUE_TOO_LARGE => Error::Server(format!("value too large: {message}")),
             status::OUT_OF_MEMORY => Error::Server(format!("out of memory: {message}")),
             other => Error::Server(format!("status 0x{other:04x}: {message}")),
+        }
+    }
+
+    /// Ensure this response answers the request identified by `opaque`.
+    ///
+    /// A mismatch means the connection is out of sync — typically a leftover
+    /// frame from a request that timed out earlier — and must be dropped:
+    /// every subsequent response would otherwise be shifted by one frame.
+    fn check_opaque(&self, opaque: u32) -> Result<()> {
+        if self.opaque == opaque {
+            Ok(())
+        } else {
+            Err(Error::Desynced(format!(
+                "response opaque {} does not match request opaque {opaque}",
+                self.opaque
+            )))
         }
     }
 }
@@ -116,6 +132,7 @@ async fn read_response(conn: &mut Connection) -> Result<Response> {
     let extras_len = header[4] as usize;
     let status = u16::from_be_bytes([header[6], header[7]]);
     let body_len = u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
+    let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
     let cas = u64::from_be_bytes(header[16..24].try_into().unwrap());
 
     if extras_len + key_len > body_len {
@@ -125,14 +142,15 @@ async fn read_response(conn: &mut Connection) -> Result<Response> {
     }
     let body = conn.read_exact(body_len).await?;
     let extras = body.slice(0..extras_len);
-    let key = body.slice(extras_len..extras_len + key_len);
+    // The key is parsed out of the body but not needed: GETKQ responses are
+    // correlated to their requests by opaque token.
     let value = body.slice(extras_len + key_len..body_len);
     Ok(Response {
         opcode,
         status,
+        opaque,
         cas,
         extras,
-        key,
         value,
     })
 }
@@ -159,17 +177,19 @@ pub(crate) async fn store(
     } else {
         &[]
     };
+    let opaque = conn.next_opaque();
     let request = build_request(
         command.binary_opcode(),
         key.as_bytes(),
         extras,
         value.as_bytes(),
         cas.unwrap_or(0),
-        0,
+        opaque,
     );
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     match response.status {
         status::OK => Ok(true),
         status::KEY_EXISTS | status::NOT_STORED | status::KEY_NOT_FOUND => Ok(false),
@@ -178,10 +198,12 @@ pub(crate) async fn store(
 }
 
 pub(crate) async fn get(conn: &mut Connection, key: &str) -> Result<Option<Value>> {
-    let request = build_request(opcode::GET, key.as_bytes(), &[], &[], 0, 0);
+    let opaque = conn.next_opaque();
+    let request = build_request(opcode::GET, key.as_bytes(), &[], &[], 0, opaque);
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     match response.status {
         status::OK => Ok(Some(Value::new(response.value.clone(), response.flags()))),
         status::KEY_NOT_FOUND => Ok(None),
@@ -190,10 +212,12 @@ pub(crate) async fn get(conn: &mut Connection, key: &str) -> Result<Option<Value
 }
 
 pub(crate) async fn get_cas(conn: &mut Connection, key: &str) -> Result<Option<CasValue>> {
-    let request = build_request(opcode::GET, key.as_bytes(), &[], &[], 0, 0);
+    let opaque = conn.next_opaque();
+    let request = build_request(opcode::GET, key.as_bytes(), &[], &[], 0, opaque);
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     match response.status {
         status::OK => {
             let value = Value::new(response.value.clone(), response.flags());
@@ -210,6 +234,9 @@ pub(crate) async fn get_multi(
 ) -> Result<HashMap<String, Value>> {
     // Pipeline: one quiet GETKQ per key, then a NOOP fence that terminates the
     // response stream. Misses produce no reply; the NOOP is the end marker.
+    // Hit responses echo their request's opaque so each value can be matched
+    // to its key; any unexpected frame means the connection is out of sync.
+    let base_opaque = conn.next_opaque();
     let mut request = Vec::new();
     for (index, key) in keys.iter().enumerate() {
         request.extend_from_slice(&build_request(
@@ -218,29 +245,32 @@ pub(crate) async fn get_multi(
             &[],
             &[],
             0,
-            index as u32,
+            base_opaque + index as u32,
         ));
     }
-    request.extend_from_slice(&build_request(
-        opcode::NOOP,
-        &[],
-        &[],
-        &[],
-        0,
-        keys.len() as u32,
-    ));
+    let noop_opaque = base_opaque + keys.len() as u32;
+    request.extend_from_slice(&build_request(opcode::NOOP, &[], &[], &[], 0, noop_opaque));
     conn.send(&request).await?;
 
     let mut map = HashMap::with_capacity(keys.len());
     loop {
         let response = read_response(conn).await?;
-        if response.opcode == opcode::NOOP {
+        if response.opcode == opcode::NOOP && response.opaque == noop_opaque {
             return Ok(map);
+        }
+        let index = response.opaque.wrapping_sub(base_opaque) as usize;
+        if response.opcode != opcode::GETKQ || index >= keys.len() {
+            return Err(Error::Desynced(format!(
+                "unexpected get_multi response frame (opcode 0x{:02x}, opaque {})",
+                response.opcode, response.opaque
+            )));
         }
         match response.status {
             status::OK => {
-                let key = String::from_utf8_lossy(&response.key).into_owned();
-                map.insert(key, Value::new(response.value.clone(), response.flags()));
+                map.insert(
+                    keys[index].to_string(),
+                    Value::new(response.value.clone(), response.flags()),
+                );
             }
             status::KEY_NOT_FOUND => {}
             _ => return Err(response.status_error()),
@@ -249,10 +279,12 @@ pub(crate) async fn get_multi(
 }
 
 pub(crate) async fn delete(conn: &mut Connection, key: &str) -> Result<bool> {
-    let request = build_request(opcode::DELETE, key.as_bytes(), &[], &[], 0, 0);
+    let opaque = conn.next_opaque();
+    let request = build_request(opcode::DELETE, key.as_bytes(), &[], &[], 0, opaque);
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     match response.status {
         status::OK => Ok(true),
         status::KEY_NOT_FOUND => Ok(false),
@@ -276,10 +308,12 @@ pub(crate) async fn incr_decr(
     } else {
         opcode::DECREMENT
     };
-    let request = build_request(op, key.as_bytes(), &extras, &[], 0, 0);
+    let opaque = conn.next_opaque();
+    let request = build_request(op, key.as_bytes(), &extras, &[], 0, opaque);
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     match response.status {
         status::OK => {
             if response.value.len() != 8 {
@@ -298,10 +332,12 @@ pub(crate) async fn incr_decr(
 
 pub(crate) async fn touch(conn: &mut Connection, key: &str, expire: Expiration) -> Result<bool> {
     let extras = expire.to_wire().to_be_bytes();
-    let request = build_request(opcode::TOUCH, key.as_bytes(), &extras, &[], 0, 0);
+    let opaque = conn.next_opaque();
+    let request = build_request(opcode::TOUCH, key.as_bytes(), &extras, &[], 0, opaque);
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     match response.status {
         status::OK => Ok(true),
         status::KEY_NOT_FOUND => Ok(false),
@@ -310,10 +346,12 @@ pub(crate) async fn touch(conn: &mut Connection, key: &str, expire: Expiration) 
 }
 
 pub(crate) async fn flush_all(conn: &mut Connection) -> Result<()> {
-    let request = build_request(opcode::FLUSH, &[], &[], &[], 0, 0);
+    let opaque = conn.next_opaque();
+    let request = build_request(opcode::FLUSH, &[], &[], &[], 0, opaque);
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     if response.status == status::OK {
         Ok(())
     } else {
@@ -322,10 +360,12 @@ pub(crate) async fn flush_all(conn: &mut Connection) -> Result<()> {
 }
 
 pub(crate) async fn version(conn: &mut Connection) -> Result<String> {
-    let request = build_request(opcode::VERSION, &[], &[], &[], 0, 0);
+    let opaque = conn.next_opaque();
+    let request = build_request(opcode::VERSION, &[], &[], &[], 0, opaque);
     conn.send(&request).await?;
 
     let response = read_response(conn).await?;
+    response.check_opaque(opaque)?;
     if response.status == status::OK {
         Ok(String::from_utf8_lossy(&response.value).into_owned())
     } else {

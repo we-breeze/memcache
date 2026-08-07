@@ -3,6 +3,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use deadpool::Runtime;
+use deadpool::managed::Object;
 use deadpool::managed::Timeouts;
 use tokio::time::timeout;
 
@@ -55,8 +56,8 @@ impl Client {
         self.run("get", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.get(key)).await
+            let result = self.timed(obj.get(key)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -69,8 +70,8 @@ impl Client {
                 self.validate_key(key)?;
             }
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.get_multi(keys)).await
+            let result = self.timed(obj.get_multi(keys)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -80,8 +81,8 @@ impl Client {
         self.run("getCas", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.get_cas(key)).await
+            let result = self.timed(obj.get_cas(key)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -181,9 +182,10 @@ impl Client {
         self.run("cas", key, async move {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.cas(key, &value.value, expire, value.cas, false))
-                .await
+            let result = self
+                .timed(obj.cas(key, &value.value, expire, value.cas, false))
+                .await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -193,8 +195,8 @@ impl Client {
         self.run("delete", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.delete(key, false)).await
+            let result = self.timed(obj.delete(key, false)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -204,8 +206,8 @@ impl Client {
         self.run("deleteWithNoreply", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.delete(key, true)).await
+            let result = self.timed(obj.delete(key, true)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
         .map(|_| ())
@@ -216,8 +218,8 @@ impl Client {
         self.run("incr", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.incr_decr(true, key, delta, false)).await
+            let result = self.timed(obj.incr_decr(true, key, delta, false)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -227,8 +229,8 @@ impl Client {
         self.run("decr", key, async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.incr_decr(false, key, delta, false)).await
+            let result = self.timed(obj.incr_decr(false, key, delta, false)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -239,8 +241,8 @@ impl Client {
         self.run("touch", key, async move {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.touch(key, expire)).await
+            let result = self.timed(obj.touch(key, expire)).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -249,8 +251,8 @@ impl Client {
     pub async fn flush_all(&self) -> Result<()> {
         self.run("flushAll", "", async {
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.flush_all()).await
+            let result = self.timed(obj.flush_all()).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -259,8 +261,8 @@ impl Client {
     pub async fn version(&self) -> Result<String> {
         self.run("version", "", async {
             let mut obj = self.pool.get().await?;
-            let conn = &mut *obj;
-            self.timed(conn.version()).await
+            let result = self.timed(obj.version()).await;
+            Self::discard_on_error(obj, result)
         })
         .await
     }
@@ -279,9 +281,10 @@ impl Client {
         let value = value.to_memcache_value();
         let expire = expire.into();
         let mut obj = self.pool.get().await?;
-        let conn = &mut *obj;
-        self.timed(conn.store(command, key, &value, expire, noreply))
-            .await
+        let result = self
+            .timed(obj.store(command, key, &value, expire, noreply))
+            .await;
+        Self::discard_on_error(obj, result)
     }
 
     /// Run `op`, logging any error at `error` level in the mesh log format.
@@ -300,6 +303,42 @@ impl Client {
                 self.config.namespace,
                 key
             );
+        }
+        result
+    }
+
+    /// Whether `err` leaves the connection in an unknown state, so it must be
+    /// dropped instead of returned to the pool:
+    ///
+    /// - `Timeout` / `Io` / `Pool`: a timed-out or failed request may leave a
+    ///   late response frame in the read buffer, desyncing the stream.
+    /// - `Desynced` / `Protocol`: the desync was actually observed, or the
+    ///   peer violated the protocol; the stream position can no longer be
+    ///   trusted.
+    ///
+    /// Server/client errors and business results (`InvalidKey`, `Decode`,
+    /// `Unsupported`, ...) are complete request/response exchanges and leave
+    /// the connection healthy.
+    fn is_connection_error(err: &Error) -> bool {
+        matches!(
+            err,
+            Error::Timeout
+                | Error::Io(_)
+                | Error::Pool(_)
+                | Error::Desynced(_)
+                | Error::Protocol(_)
+        )
+    }
+
+    /// Drop `conn` if `result` holds a connection-level error (see
+    /// [`Client::is_connection_error`]), then return `result` unchanged.
+    fn discard_on_error<T>(conn: Object<Manager>, result: Result<T>) -> Result<T> {
+        if let Err(ref err) = result
+            && Self::is_connection_error(err)
+        {
+            // Take the connection out of the pool so it is dropped instead
+            // of being recycled with a poisoned read buffer.
+            let _ = Object::take(conn);
         }
         result
     }
