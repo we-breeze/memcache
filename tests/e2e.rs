@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use memcache::{CasValue, Client, Config, Protocol};
+use memcache::{CasValue, Client, Config, Endpoint, Protocol};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -604,6 +604,57 @@ async fn binary_timeout_drops_connection() {
     // The next request must use a *new* connection (the second one the server
     // answers) and succeed.
     assert!(client.get("k").await.unwrap().is_none());
+}
+
+/// After the socks registry starts advertising a different port, the client
+/// must follow it: the old endpoint is drained and requests reach the server
+/// on the new port without a process restart.
+#[tokio::test]
+async fn mesh_rediscovery_follows_port_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock_name =
+        |port: u16| format!("config.example.com+3+config+v1+grp+all:nsX@mc:{port}@cs");
+
+    // Initial registry entry points at the first fake server.
+    let port_a = spawn(Protocol::Binary).await;
+    std::fs::write(dir.path().join(sock_name(port_a)), []).unwrap();
+
+    let client = Client::new(Config::mesh_in(dir.path(), "grp", "nsX").unwrap()).unwrap();
+    assert_eq!(
+        client.current_endpoint(),
+        Endpoint::Tcp {
+            host: "127.0.0.1".into(),
+            port: port_a
+        }
+    );
+    client.set("k", "v", 60u32).await.unwrap();
+
+    // Mesh reassigns the port: the registry entry now points at a second
+    // server, and the old entry is gone.
+    let port_b = spawn(Protocol::Binary).await;
+    std::fs::remove_file(dir.path().join(sock_name(port_a))).unwrap();
+    std::fs::write(dir.path().join(sock_name(port_b)), []).unwrap();
+
+    // A manual refresh (what the background task does periodically) picks it up.
+    assert!(client.refresh_endpoint().unwrap());
+    assert_eq!(
+        client.current_endpoint(),
+        Endpoint::Tcp {
+            host: "127.0.0.1".into(),
+            port: port_b
+        }
+    );
+
+    // Requests now hit the new server (the old value is not there).
+    assert!(client.get("k").await.unwrap().is_none());
+    client.set("k", "v2", 60u32).await.unwrap();
+    assert_eq!(
+        client.get("k").await.unwrap().unwrap().as_string().unwrap(),
+        "v2"
+    );
+
+    // Refreshing again without a registry change is a no-op.
+    assert!(!client.refresh_endpoint().unwrap());
 }
 
 /// A `MakeWriter` that appends all log output into a shared buffer.

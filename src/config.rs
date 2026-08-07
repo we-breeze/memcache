@@ -32,6 +32,12 @@ pub enum Endpoint {
 pub struct Config {
     /// Endpoint to connect to.
     pub endpoint: Endpoint,
+    /// Mesh rediscovery coordinates, set when the endpoint was discovered via
+    /// the socks registry ([`Config::mesh`] / [`Config::mesh_in`] /
+    /// [`Config::sock`]). When present, the client periodically rescans the
+    /// registry and follows endpoint changes (e.g. a mesh port reassignment);
+    /// pooled connections to the old endpoint are drained on change.
+    pub mesh_discovery: Option<MeshDiscovery>,
     /// Protocol to speak.
     pub protocol: Protocol,
     /// Namespace used to identify this client in logs (matches the mesh
@@ -53,6 +59,19 @@ pub struct Config {
     /// When `false` the key is passed through unchecked, matching the mesh
     /// deployment where the sidecar performs any needed rewriting.
     pub validate_keys: bool,
+}
+
+/// How to rediscover the mesh endpoint: rescan the socks registry in `dir`
+/// for the entry matching `group`/`namespace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeshDiscovery {
+    /// Directory holding the socks registry files.
+    pub dir: PathBuf,
+    /// Service group to match (the `+<group>+all:` suffix), if known. `None`
+    /// (from [`Config::sock`]) matches only by namespace.
+    pub group: Option<String>,
+    /// Cache namespace to match.
+    pub namespace: String,
 }
 
 /// memcached's hard key-length limit, in bytes.
@@ -96,7 +115,18 @@ impl Config {
         let name = name
             .to_str()
             .ok_or_else(|| Error::MeshDiscovery("sock file name is not UTF-8".into()))?;
-        Ok(Self::new(mesh::endpoint_from_name(dir, name)?))
+        let endpoint = mesh::endpoint_from_name(dir, name)?;
+        let namespace = mesh::namespace_from_name(name).map(str::to_string);
+        let mut config = Self::new(endpoint);
+        config.mesh_discovery = Some(MeshDiscovery {
+            dir: dir.to_path_buf(),
+            group: mesh::group_from_name(name).map(str::to_string),
+            namespace: namespace.clone().unwrap_or_default(),
+        });
+        if let Some(namespace) = namespace {
+            config.namespace = namespace;
+        }
+        Ok(config)
     }
 
     /// Discover the mesh memcached endpoint for `group`/`namespace` by scanning
@@ -108,14 +138,22 @@ impl Config {
 
     /// Like [`Config::mesh`] but scans `dir` instead of the default directory.
     pub fn mesh_in(dir: impl AsRef<Path>, group: &str, namespace: &str) -> Result<Self> {
-        let endpoint = mesh::discover(dir.as_ref(), group, namespace)?;
-        Ok(Self::new(endpoint).with_namespace(namespace))
+        let dir = dir.as_ref();
+        let endpoint = mesh::discover(dir, group, namespace)?;
+        let mut config = Self::new(endpoint).with_namespace(namespace);
+        config.mesh_discovery = Some(MeshDiscovery {
+            dir: dir.to_path_buf(),
+            group: Some(group.to_string()),
+            namespace: namespace.to_string(),
+        });
+        Ok(config)
     }
 
     /// Build a config from an [`Endpoint`] with default pool/timeout settings.
     pub fn new(endpoint: Endpoint) -> Self {
         Config {
             endpoint,
+            mesh_discovery: None,
             protocol: Protocol::default(),
             namespace: String::new(),
             max_connections: 64,

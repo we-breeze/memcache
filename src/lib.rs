@@ -27,6 +27,7 @@
 mod client;
 mod config;
 mod connection;
+mod discovery;
 mod error;
 mod expiration;
 mod mesh;
@@ -35,7 +36,7 @@ mod protocol;
 mod value;
 
 pub use client::Client;
-pub use config::{Config, Endpoint, Protocol};
+pub use config::{Config, Endpoint, MeshDiscovery, Protocol};
 pub use error::{Error, Result};
 pub use expiration::Expiration;
 pub use mesh::DEFAULT_SOCKS_DIR;

@@ -105,6 +105,25 @@ let c = Config::mesh_in("/data1/breeze/socks", "grp", "ns")?;
 These constructors default to the binary protocol, matching the mesh
 `PingPongMemcachedBinaryClient`.
 
+### Endpoint rediscovery
+
+Mesh ports are normally fixed per service, but occasionally reassigned. When
+the config was built from the socks registry (`Config::mesh` / `mesh_in` /
+`sock`), the client keeps the discovery coordinates and follows registry
+changes: new connections dial the new endpoint and idle connections to the
+old one are drained.
+
+Scanning is **shared per directory**: all clients watching the same socks
+directory share a single background task and a single scan every 5 seconds,
+so a process with hundreds of namespaces costs one timer and one directory
+read, not one per namespace. The scan task starts on first use and stops when
+the last client watching the directory is dropped. Clients are only woken
+when the registry snapshot actually changes.
+
+`Client::refresh_endpoint()` forces a rescan on demand (e.g. after a burst of
+connect failures) and `Client::current_endpoint()` reports the endpoint
+currently in use.
+
 ## API
 
 The client exposes the `CacheAble`-equivalent surface plus a few extras:

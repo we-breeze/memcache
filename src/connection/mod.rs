@@ -78,9 +78,11 @@ pub(crate) struct Connection {
 }
 
 impl Connection {
-    /// Establish a new connection according to `config`.
-    pub(crate) async fn connect(config: &Config) -> Result<Self> {
-        let stream = match &config.endpoint {
+    /// Establish a new connection according to `config`, dialing `endpoint`
+    /// (the currently discovered mesh endpoint, which may differ from the one
+    /// in `config` after a rediscovery).
+    pub(crate) async fn connect(config: &Config, endpoint: &Endpoint) -> Result<Self> {
+        let stream = match endpoint {
             Endpoint::Tcp { host, port } => {
                 let connect = TcpStream::connect((host.as_str(), *port));
                 let stream = timeout(config.connect_timeout, connect)

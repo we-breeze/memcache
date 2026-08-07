@@ -33,6 +33,25 @@ struct ParsedSock {
     endpoint: Endpoint,
 }
 
+/// Coordinates identifying one memcached service in the registry.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SockKey {
+    pub(crate) group: Option<String>,
+    pub(crate) namespace: String,
+}
+
+impl ParsedSock {
+    /// The `(group, namespace)` this entry serves, if it is a memcached entry.
+    fn key(&self) -> Option<SockKey> {
+        if self.protocol != MC_PROTOCOL {
+            return None;
+        }
+        let group = group_from_name(&self.service).map(str::to_string);
+        let namespace = namespace_from_name(&self.service)?.to_string();
+        Some(SockKey { group, namespace })
+    }
+}
+
 /// Parse a socks registry file name into a service + endpoint.
 ///
 /// Returns `None` if the name does not have the expected `a@b@c` shape.
@@ -73,13 +92,50 @@ pub(crate) fn endpoint_from_name(dir: &Path, name: &str) -> Result<Endpoint> {
         .ok_or_else(|| Error::MeshDiscovery(format!("invalid sock name: {name}")))
 }
 
+/// Extract the cache namespace (after `+all:`) from a registry file name.
+pub(crate) fn namespace_from_name(name: &str) -> Option<&str> {
+    let service = name.split('@').next()?;
+    let (_, namespace) = service.rsplit_once("+all:")?;
+    if namespace.is_empty() {
+        None
+    } else {
+        Some(namespace)
+    }
+}
+
+/// Extract the service group (the `+<group>+all:` segment) from a registry
+/// file name.
+pub(crate) fn group_from_name(name: &str) -> Option<&str> {
+    let service = name.split('@').next()?;
+    let (before_ns, _) = service.rsplit_once("+all:")?;
+    before_ns
+        .rsplit('+')
+        .next()
+        .filter(|group| !group.is_empty())
+}
+
 /// Locate the memcached endpoint for `group`/`namespace` under `dir`.
 ///
 /// Matches the registry file whose protocol is `mc` and whose service ends with
 /// `+<group>+all:<namespace>`, ignoring the (deployment-specific) domain prefix.
 /// A unix-socket match is preferred over a TCP match when both are present.
 pub(crate) fn discover(dir: &Path, group: &str, namespace: &str) -> Result<Endpoint> {
-    let suffix = format!("+{group}+all:{namespace}");
+    discover_matching(dir, Some(group), namespace)
+}
+
+/// Locate the memcached endpoint for `namespace` under `dir`, optionally
+/// constraining the service group. With `group = None` any group whose
+/// namespace matches is accepted (used when the original registry file name
+/// is the only source of coordinates).
+pub(crate) fn discover_matching(
+    dir: &Path,
+    group: Option<&str>,
+    namespace: &str,
+) -> Result<Endpoint> {
+    let suffix = match group {
+        Some(group) => format!("+{group}+all:{namespace}"),
+        None => format!("+all:{namespace}"),
+    };
     let entries = fs::read_dir(dir).map_err(|err| {
         Error::MeshDiscovery(format!("cannot read socks dir {}: {err}", dir.display()))
     })?;
@@ -105,10 +161,48 @@ pub(crate) fn discover(dir: &Path, group: &str, namespace: &str) -> Result<Endpo
 
     tcp_match.ok_or_else(|| {
         Error::MeshDiscovery(format!(
-            "no memcached sock for group={group} namespace={namespace} in {}",
+            "no memcached sock for group={group:?} namespace={namespace} in {}",
             dir.display()
         ))
     })
+}
+
+/// Scan `dir` once and return every memcached entry as a
+/// `(group, namespace) → endpoint` map. Used by the shared rediscovery
+/// scanner, which scans a directory once for all clients watching it.
+///
+/// Returns an empty map (not an error) when the directory cannot be read, so
+/// a transiently missing registry does not wipe out the last known snapshot;
+/// callers comparing against the snapshot keep their current endpoint.
+pub(crate) fn scan_all(dir: &Path) -> std::collections::HashMap<SockKey, Endpoint> {
+    let mut map = std::collections::HashMap::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(parsed) = parse_sock(dir, name) else {
+            continue;
+        };
+        let Some(key) = parsed.key() else {
+            continue;
+        };
+        // Prefer unix sockets over TCP when both are present.
+        match (map.get(&key), &parsed.endpoint) {
+            (Some(Endpoint::Unix { .. }), _) => {}
+            (_, endpoint @ Endpoint::Unix { .. }) => {
+                map.insert(key, endpoint.clone());
+            }
+            (None, endpoint) => {
+                map.insert(key, endpoint.clone());
+            }
+            _ => {}
+        }
+    }
+    map
 }
 
 #[cfg(test)]

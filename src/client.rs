@@ -1,16 +1,17 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use deadpool::Runtime;
 use deadpool::managed::Object;
 use deadpool::managed::Timeouts;
 use tokio::time::timeout;
 
-use crate::config::{Config, MAX_KEY_LEN};
+use crate::config::{Config, Endpoint, MAX_KEY_LEN};
+use crate::discovery::DirectoryWatcher;
 use crate::error::{Error, Result};
 use crate::expiration::Expiration;
-use crate::pool::{Manager, Pool};
+use crate::pool::{Manager, Pool, SharedEndpoint};
 use crate::protocol::StoreCommand;
 use crate::value::{CasValue, ToMemcacheValue, Value};
 
@@ -29,13 +30,26 @@ use crate::value::{CasValue, ToMemcacheValue, Value};
 pub struct Client {
     pool: Pool,
     config: Arc<Config>,
+    endpoint: SharedEndpoint,
+    /// Subscription to the shared registry scanner for the socks directory
+    /// this client's endpoint was discovered in. `None` for clients built
+    /// from an explicit TCP/unix endpoint. Keeping it alive keeps the
+    /// (shared, per-directory) scan task running.
+    watcher: Option<Arc<DirectoryWatcher>>,
 }
 
 impl Client {
     /// Build a client and its connection pool from `config`.
+    ///
+    /// If the config carries mesh discovery coordinates (set by
+    /// [`Config::mesh`] / [`Config::mesh_in`] / [`Config::sock`]), a
+    /// lightweight background task periodically rescans the socks registry
+    /// and, when the advertised endpoint changes (e.g. a mesh port
+    /// reassignment), switches new connections over and drains the old ones.
     pub fn new(config: Config) -> Result<Self> {
         let config = Arc::new(config);
-        let manager = Manager::new(config.clone());
+        let endpoint: SharedEndpoint = Arc::new(RwLock::new(config.endpoint.clone()));
+        let manager = Manager::new(config.clone(), endpoint.clone());
         let pool = Pool::builder(manager)
             .max_size(config.max_connections)
             .timeouts(Timeouts {
@@ -46,7 +60,18 @@ impl Client {
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|err| Error::Pool(err.to_string()))?;
-        Ok(Client { pool, config })
+        let watcher = config
+            .mesh_discovery
+            .as_ref()
+            .map(|discovery| Arc::new(crate::discovery::watch(discovery.dir.clone())));
+        let client = Client {
+            pool,
+            config,
+            endpoint,
+            watcher,
+        };
+        client.spawn_endpoint_tracker();
+        Ok(client)
     }
 
     // --- reads ---
@@ -367,5 +392,90 @@ impl Client {
             ));
         }
         Ok(())
+    }
+
+    /// The endpoint the pool currently dials (updated by mesh rediscovery).
+    pub fn current_endpoint(&self) -> Endpoint {
+        self.endpoint
+            .read()
+            .expect("endpoint lock poisoned")
+            .clone()
+    }
+
+    /// Rescan the mesh registry and, if the advertised endpoint changed,
+    /// switch the pool over. Returns `true` if the endpoint changed.
+    ///
+    /// The rescan is shared: it refreshes the directory-wide snapshot all
+    /// clients subscribe to (and wakes their tracker tasks), so one manual
+    /// refresh serves every namespace in the same directory. Called with the
+    /// latest snapshot by the automatic tracker; exposed so callers can force
+    /// a refresh after observing a burst of connect failures.
+    pub fn refresh_endpoint(&self) -> Result<bool> {
+        if let Some(ref watcher) = self.watcher {
+            watcher.rescan();
+        }
+        self.apply_snapshot()
+    }
+
+    /// Apply the latest shared registry snapshot to this client's endpoint,
+    /// switching the pool over if it changed. Does not rescan; called by the
+    /// tracker task whenever the shared scanner observes a change.
+    fn apply_snapshot(&self) -> Result<bool> {
+        let Some(ref discovery) = self.config.mesh_discovery else {
+            return Ok(false);
+        };
+        let watcher = self.watcher.as_ref().expect("checked above");
+        let found = watcher
+            .lookup(discovery.group.as_deref(), &discovery.namespace)
+            .ok_or_else(|| {
+                Error::MeshDiscovery(format!(
+                    "namespace {} no longer advertised in {}",
+                    discovery.namespace,
+                    discovery.dir.display()
+                ))
+            })?;
+        let changed = {
+            let mut current = self.endpoint.write().expect("endpoint lock poisoned");
+            if *current == found {
+                false
+            } else {
+                *current = found.clone();
+                true
+            }
+        };
+        if changed {
+            // Drain idle connections to the old endpoint; in-flight ones fail
+            // or complete and are then recycled from the new endpoint.
+            self.pool.retain(|_, _| false);
+            tracing::info!(
+                namespace = %self.config.namespace,
+                endpoint = ?found,
+                "mc mesh endpoint changed, drained stale connections"
+            );
+        }
+        Ok(changed)
+    }
+
+    /// Start a lightweight task that applies registry snapshot changes pushed
+    /// by the shared per-directory scanner. The task only wakes when the
+    /// snapshot actually changes, so an idle deployment costs nothing.
+    fn spawn_endpoint_tracker(&self) {
+        let Some(ref watcher) = self.watcher else {
+            return;
+        };
+        let client = self.clone();
+        let watcher = watcher.clone();
+        tokio::spawn(async move {
+            loop {
+                watcher.changed().await;
+                if let Err(err) = client.apply_snapshot() {
+                    tracing::warn!(
+                        error = %err,
+                        namespace = %client.config.namespace,
+                        "mc mesh endpoint refresh failed"
+                    );
+                }
+            }
+        });
     }
 }
