@@ -36,6 +36,8 @@ mod pool;
 mod protocol;
 mod value;
 
+pub mod cacheservice;
+
 pub use client::Client;
 pub use config::{Config, Endpoint, MeshDiscovery, Protocol};
 pub use error::{Error, Result};
