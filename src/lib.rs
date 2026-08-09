@@ -42,3 +42,9 @@ pub use error::{Error, Result};
 pub use expiration::Expiration;
 pub use mesh::DEFAULT_SOCKS_DIR;
 pub use value::{CasValue, ToMemcacheValue, Value, flags};
+
+#[cfg(feature = "direct-tcp")]
+pub mod direct;
+
+#[cfg(feature = "direct-tcp")]
+pub use direct::{MemcacheError, MemcacheGet, MemcachePool, new_compat_hash, text_get};
