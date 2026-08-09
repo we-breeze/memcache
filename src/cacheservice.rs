@@ -115,10 +115,7 @@ pub enum CacheServiceError {
 /// `namespace` must be non-empty (after trimming) and contain no control
 /// characters; otherwise an [`CacheServiceError::InvalidNamespace`] is returned
 /// before parsing.
-pub fn masters_from_yaml(
-    yaml: &str,
-    namespace: &str,
-) -> Result<Vec<String>, CacheServiceError> {
+pub fn masters_from_yaml(yaml: &str, namespace: &str) -> Result<Vec<String>, CacheServiceError> {
     if namespace.trim().is_empty() || namespace.chars().any(char::is_control) {
         return Err(CacheServiceError::InvalidNamespace(namespace.to_string()));
     }
@@ -150,7 +147,10 @@ mod tests {
             ]
         );
         assert_eq!(ns.slave_l1().len(), 1);
-        assert_eq!(ns.slave_l1()[0], &["192.0.2.28:15138", "192.0.2.29:15138"]);
+        assert_eq!(
+            ns.slave_l1()[0],
+            &["192.0.2.28:15138", "192.0.2.29:15138"]
+        );
     }
 
     #[test]
