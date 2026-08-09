@@ -2,11 +2,19 @@
 //! `example-abtest` user-info cache.
 //!
 //! This is the direct-TCP path used under replay/comparison topologies where
-//! the target connects directly to the recorded memcached nodes (e.g.
-//! `vintage-node-*.trp.test:15138`) — it is NOT the mesh sidecar path. It
-//! reproduces the source service's `SockIOPool.NEW_COMPAT_HASH` (crc32 +
-//! modula) node selection so the replay proxy can match recorded memcached
-//! exchanges by (target host, key).
+//! the target connects directly to the recorded memcached nodes — it is NOT
+//! the mesh sidecar path. It reproduces the source service's
+//! `SockIOPool.NEW_COMPAT_HASH` (crc32 + modula) node selection so the replay
+//! proxy can match recorded memcached exchanges by (target host, key).
+//!
+//! The master node list is NOT baked in here: the caller discovers it at
+//! startup via a Vintage `/1/config/service` lookup of the cache pool group
+//! (see the `vintage` crate's `get_cacheservice_masters`). Under replay the
+//! lookup returns the recorded fake IPs; under comparison/production it
+//! returns real addresses. [`MemcachePool::from_masters`] builds the pool from
+//! that list. [`MemcachePool::default_example_abtest`] is retained only as a
+//! test fixture sourced from a recorded vintage-node list — it is not used at
+//! runtime.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -140,12 +148,12 @@ pub struct MemcachePool {
 
 /// Default master list for the `example-abtest` namespace.
 ///
-/// This is the source-proven static configuration parsed from the recorded
-/// vintage naming response for `cache.service.feedcontent.pool.yf` /
-/// namespace `example-abtest`. It is used when no runtime pool config is
-/// supplied (e.g. local smoke tests without a replay proxy). Under replay,
-/// the same list is recovered from the recorded naming exchange, so the
-/// selected hostname is identical.
+/// **Test fixture only.** This is a recorded vintage-node list carried for the
+/// unit tests below; it is NOT used at runtime. The runtime master list is
+/// discovered at startup via Vintage `/1/config/service`
+/// (`vintage::Client::get_cacheservice_masters`) so the same code path works
+/// under replay, comparison, and production without hardcoding node addresses.
+#[cfg(test)]
 const DEFAULT_example_ABTEST_MASTERS: &[&str] = &[
     "vintage-node-10-185-32-132.trp.test:15138",
     "vintage-node-10-2-29-229.trp.test:15138",
@@ -154,8 +162,12 @@ const DEFAULT_example_ABTEST_MASTERS: &[&str] = &[
 ];
 
 impl MemcachePool {
-    /// Build the default `example-abtest` pool from the source-proven static
-    /// master list.
+    /// Build the default `example-abtest` pool from the recorded static master
+    /// list.
+    ///
+    /// **Test fixture only** — not used at runtime. See
+    /// [`DEFAULT_example_ABTEST_MASTERS`].
+    #[cfg(test)]
     pub fn default_example_abtest() -> Self {
         let masters: Arc<[String]> = DEFAULT_example_ABTEST_MASTERS
             .iter()

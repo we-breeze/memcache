@@ -289,7 +289,12 @@ async fn text_get_large_value_round_trips() {
 /// documented `new_compat_hash(key) % len` formula.
 #[test]
 fn select_endpoint_is_deterministic_and_matches_formula() {
-    let pool = MemcachePool::default_example_abtest();
+    let pool = MemcachePool::from_masters([
+        "vintage-node-10-185-32-132.trp.test:15138".to_string(),
+        "vintage-node-10-2-29-229.trp.test:15138".to_string(),
+        "vintage-node-10-2-37-234.trp.test:15138".to_string(),
+        "vintage-node-10-30-214-36.trp.test:15138".to_string(),
+    ]);
     assert_eq!(pool.len(), 4);
     assert!(!pool.is_empty());
 
