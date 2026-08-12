@@ -1,0 +1,56 @@
+# 本地测试用 cache-service YAML 配置（Vintage statics-config 快照里
+# `all` 键的文档格式），配合 tools/mc-bench/bench_local.sh 的
+# service-yaml 模式或手工测试使用。
+#
+# 拓扑（端口与 bench_local.sh 的 MC_PORT=21311 布局一致）：
+#   test.local:    1 master + 1 master_l1 组 + 1 slave + 1 slave_l1 组
+#   test.sharded:  2 master + 2 slave，验证 crc32/modula 分片路由
+#
+# 字段含义见 src/cacheservice.rs；未解析的字段（timeout、exptime 等）
+# 会被忽略，但保留在这里以保持与生产快照相同的形状。
+
+global:
+  get_sign_time: 10000
+  heart_beat_time: 2000
+
+test.local:
+  hash: crc32
+  distribution: modula
+  hash_tag: test.local
+  save_tag: false
+  auto_eject_hosts: false
+  timeout: 300
+  redis: false
+  server_retry_timeout: 10000
+  server_failure_limit: 2
+  partial_reply: true
+  exptime: 86400
+  master:
+   - 127.0.0.1:21311
+  master_l1:
+   -
+     - 127.0.0.1:21312
+  slave:
+   - 127.0.0.1:21313
+  slave_l1:
+   -
+     - 127.0.0.1:21314
+
+test.sharded:
+  hash: crc32
+  distribution: modula
+  hash_tag: test.sharded
+  save_tag: false
+  auto_eject_hosts: false
+  timeout: 300
+  redis: false
+  server_retry_timeout: 10000
+  server_failure_limit: 2
+  partial_reply: true
+  exptime: 86400
+  master:
+   - 127.0.0.1:21311
+   - 127.0.0.1:21312
+  slave:
+   - 127.0.0.1:21313
+   - 127.0.0.1:21314

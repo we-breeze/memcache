@@ -78,6 +78,18 @@ struct Args {
     #[arg(long, value_delimiter = ',')]
     masters: Option<Vec<String>>,
 
+    /// Service-from-YAML mode: path to a cache-service YAML document (the
+    /// Vintage statics-config `all` format; see
+    /// tests/fixtures/cache_service_local.yaml). The topology for --ns is
+    /// parsed and built exactly like the production path:
+    /// CacheServiceConfig → HaConfig::from_namespace → HaClient.
+    #[arg(long)]
+    service_yaml: Option<String>,
+
+    /// Namespace inside --service-yaml to build the client for.
+    #[arg(long, default_value = "test.local")]
+    ns: String,
+
     /// Service mode: L1 slave endpoints (read-first tier).
     #[arg(long, value_delimiter = ',')]
     slave_l1: Option<Vec<String>>,
@@ -473,6 +485,29 @@ async fn resolve(host_port: &str) -> Result<std::net::SocketAddr, String> {
 
 /// Build the client the harness will drive.
 fn build_client(args: &Args) -> Result<BenchClient, String> {
+    if let Some(yaml_path) = &args.service_yaml {
+        let yaml = std::fs::read_to_string(yaml_path)
+            .map_err(|e| format!("read --service-yaml {yaml_path}: {e}"))?;
+        let config = memcache::cacheservice::CacheServiceConfig::from_yaml_str(&yaml)
+            .map_err(|e| format!("parse --service-yaml {yaml_path}: {e}"))?;
+        let ns = config
+            .namespace(&args.ns)
+            .ok_or_else(|| format!("namespace '{}' not in {yaml_path}", args.ns))?;
+        let mut ha = memcache::direct::HaConfig::from_namespace(ns)
+            .map_err(|e| e.to_string())?
+            .with_write_slave(args.write_slave);
+        // Apply the CLI pool/timeout/protocol template to every tier.
+        let first = ha.masters.first().cloned();
+        if let Some(first) = first {
+            ha = ha.with_server(server_config(args, &first)?);
+        }
+        eprintln!(
+            "service-yaml: ns={} masters={:?} slave_l1={:?} slaves={:?} write_slave={}",
+            args.ns, ha.masters, ha.slave_l1, ha.slaves, args.write_slave
+        );
+        let client = memcache::direct::HaClient::connect(ha).map_err(|e| e.to_string())?;
+        return Ok(BenchClient::Ha(Arc::new(client)));
+    }
     if let Some(masters) = &args.masters {
         let server = server_config(args, &masters[0])?;
         let mut ha = memcache::direct::HaConfig::new(masters.clone())

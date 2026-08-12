@@ -10,6 +10,12 @@
 #   shards   N 个原生 memcached 当分片，走 direct::Shards 客户端路由
 #   service  master + slave_l1 + slave 三实例，走 direct::HaClient
 #            主从拓扑客户端（写 master、读逐级回退；WRITE_SLAVE=1 双写）
+#   service-yaml
+#            从 cache-service YAML 构建拓扑（生产路径：
+#            CacheServiceConfig → HaConfig::from_namespace → HaClient）；
+#            默认用 tests/fixtures/cache_service_local.yaml（test.local：
+#            master=MC_PORT, master_l1=MC_PORT+1, slave=MC_PORT+2,
+#            slave_l1=MC_PORT+3，共 4 实例）
 #
 # 用法示例：
 #
@@ -21,6 +27,8 @@
 #     MODE=shards SHARDS=4 ./bench_local.sh --ops 1000000 get # N 个本机 memcached 分片
 #     MODE=service ./bench_local.sh --ops 1000000 get         # master/slave 拓扑
 #     MODE=service WRITE_SLAVE=1 ./bench_local.sh --ops 1000000 get  # 双写 slave 层
+#     MODE=service-yaml ./bench_local.sh --ops 1000000 get    # YAML 拓扑（test.local）
+#     MODE=service-yaml NS=test.sharded WRITE_SLAVE=1 ./bench_local.sh --ops 1000000 get
 #
 #   故障注入（本地代理按帧注入）：
 #     ./bench_local.sh --ops 1000000 get --slow-rate 0.0001 --slow-ms 200
@@ -54,6 +62,9 @@
 #               service 占用 MC_PORT(master)、MC_PORT+1(slave_l1)、MC_PORT+2(slave)）
 #   SHARDS      分片数（默认 4，仅 shards 模式）
 #   WRITE_SLAVE 1 = service 模式双写 slave 层（默认关）
+#   NS          service-yaml 模式的命名空间（默认 test.local）
+#   YAML        service-yaml 模式的配置文件（默认
+#               ../../tests/fixtures/cache_service_local.yaml）
 #   OPS         矩阵模式每场的操作数（默认 500000）
 #   MEMCACHED   memcached 路径（默认 PATH 里的 memcached）
 #   MEM         每个实例的内存上限 MB（默认 4096，避免大 key 池被 LRU 驱逐）
@@ -77,6 +88,9 @@ MEM="${MEM:-4096}"
 CARGO="${CARGO:-cargo}"
 NAMESPACE="${NAMESPACE:-bench_ns}"
 GROUP="${GROUP:-bench}"
+NS="${NS:-test.local}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YAML="${YAML:-$SCRIPT_DIR/../../tests/fixtures/cache_service_local.yaml}"
 # 每次运行独立的 sock 目录：旧目录里的残留 sock 文件会赢得发现、指向死端口。
 SOCK_DIR="$(mktemp -d /tmp/mc-bench-socks.XXXXXX)"
 
@@ -160,8 +174,28 @@ prepare() {
         TARGET_ARGS+=(--write-slave)
       fi
       ;;
+    service-yaml)
+      # test.local 拓扑：master / master_l1 / slave / slave_l1 各占一个端口。
+      for i in 0 1 2 3; do
+        ensure_memcached "$((MC_PORT + i))"
+      done
+      local yaml="$YAML"
+      if [[ "$MC_PORT" != "21311" ]]; then
+        # 配置文件的端口按默认布局写死；端口偏移时生成一份临时副本。
+        yaml="$SOCK_DIR/cache_service_local.yaml"
+        sed -e "s/21311/$MC_PORT/g" \
+            -e "s/21312/$((MC_PORT + 1))/g" \
+            -e "s/21313/$((MC_PORT + 2))/g" \
+            -e "s/21314/$((MC_PORT + 3))/g" "$YAML" > "$yaml"
+      fi
+      echo "service-yaml 模式: ns=$NS yaml=$yaml write_slave=$WRITE_SLAVE"
+      TARGET_ARGS=(--service-yaml "$yaml" --ns "$NS")
+      if [[ "$WRITE_SLAVE" == "1" ]]; then
+        TARGET_ARGS+=(--write-slave)
+      fi
+      ;;
     *)
-      echo "error: 未知 MODE '$MODE'（direct | sidecar | replay | shards | service）" >&2
+      echo "error: 未知 MODE '$MODE'（direct | sidecar | replay | shards | service | service-yaml）" >&2
       exit 2
       ;;
   esac
