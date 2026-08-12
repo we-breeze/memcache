@@ -1,137 +1,152 @@
 # memcache
 
-A high-performance, async **memcached client for Rust**, implementing both the
-**text (ASCII)** and **binary** wire protocols. It targets the breeze *byMesh*
-deployment shape: the client connects to a single memcached endpoint (a mesh
-sidecar over TCP or a unix socket) and uses a bounded connection pool for
-concurrency and availability.
+A high-performance, high-availability **async memcached client** (Rust /
+tokio) for the breeze platform, with **three explicitly separated access
+modes**:
 
-The public API mirrors breeze-sdk-core's `CacheAble` interface
-(`MeshMemcacheTemplate` / `TextMemcacheClient` / `PingPongMemcachedBinaryClient`).
+- **Mesh mode** ([`sidecar`]) — talk to the local breeze mesh agent,
+  discovered from the sock registry files it publishes; the mesh proxies to
+  the real backends and owns sharding and failover. (The *byMesh* path.)
+- **Direct backend mode** ([`direct`]) — connect to memcached backends
+  directly, with client-side shard routing using the same hash/distribution
+  algorithms as the mesh. (The *byTcp* path.)
+- **Replay mode** ([`replay`], feature `direct-tcp`) — a direct-TCP
+  text-protocol client for replay/comparison topologies, reproducing the
+  source service's `SockIOPool.NEW_COMPAT_HASH` (crc32 + modula) node
+  selection so a replay proxy can lane-match recorded exchanges.
 
-## Features
+Both wire protocols (text and binary) are implemented; binary is the
+default, matching the mesh `PingPongMemcachedBinaryClient`. The public API
+mirrors breeze-sdk-core's `CacheAble` interface (`MeshMemcacheTemplate`).
 
-- `async` / [Tokio](https://tokio.rs) throughout, built on [`bytes`](https://docs.rs/bytes).
-- Text **and** binary protocols, selectable per client.
-- Connection pooling via [`deadpool`](https://docs.rs/deadpool) with
-  request/response correlation: the binary protocol matches each response to
-  its request by opaque token, and connections that fail, time out, or show a
-  desynced frame are dropped instead of being recycled.
-- Pool floor and liveness: a single shared background task keeps every client
-  topped up to `Config::min_connections` (not one task per client), and TCP
-  keepalive reaps half-open connections to a crashed mesh before they can
-  stall a request.
-- TCP (`host:port`) and unix-socket endpoints.
-- Per-operation timeouts and key validation.
-- Java-compatible value flag markers (int/long/bool/string), so values are
-  interoperable with the `cn.vika.memcached` / `com.schooner.MemCached` clients.
-
-## Usage
+## Mesh mode (sidecar)
 
 ```rust
-use memcache::{Client, Config, Protocol};
-use std::time::Duration;
+use memcache::sidecar::SidecarClient;
 
-#[tokio::main]
-async fn main() -> memcache::Result<()> {
-    // Binary protocol over TCP (the default protocol is Binary).
-    let config = Config::tcp("127.0.0.1", 11211)
-        .with_protocol(Protocol::Binary)
-        .with_max_connections(128) // the default; pool grows to this on demand
-        .with_min_connections(2) // the default; established at startup, kept topped up
-        .with_op_timeout(Duration::from_millis(400));
-    let client = Client::new(config)?;
+# async fn demo() -> memcache::Result<()> {
+// Connect to the mesh for a resource namespace.
+let client = SidecarClient::connect("my_mc_namespace")?;
 
-    // Store and fetch.
-    client.set("greeting", "hello", 60u32).await?;      // expire in 60s
-    let value = client.get("greeting").await?;
-    assert_eq!(value.unwrap().as_string()?, "hello");
+client.set("greeting", "hello", 60u32).await?;      // expire in 60s
+let value = client.get("greeting").await?;
+assert_eq!(value.unwrap().as_string()?, "hello");
 
-    // Conditional stores.
-    client.add("greeting", "ignored", 60u32).await?;    // false: already exists
-    client.replace("greeting", "hi", 60u32).await?;     // true
-
-    // Compare-and-swap.
-    if let Some(cas) = client.get_cas("greeting").await? {
-        let next = memcache::CasValue::new(memcache::Value::new("hiya", 0), cas.cas);
-        client.cas("greeting", &next, 60u32).await?;
-    }
-
-    // Counters and multi-get.
-    client.set("n", "10", 0u32).await?;
-    assert_eq!(client.incr("n", 5).await?, Some(15));
-    let many = client.get_multi(&["greeting", "n"]).await?;
-
-    client.delete("greeting").await?;
-    Ok(())
+// Conditional stores and CAS.
+client.add("greeting", "ignored", 60u32).await?;    // false: already exists
+if let Some(cas) = client.get_cas("greeting").await? {
+    let next = memcache::CasValue::new(memcache::Value::new("hiya", 0), cas.cas);
+    client.cas("greeting", &next, 60u32).await?;
 }
+
+// Counters and multi-get.
+client.set("n", "10", 0u32).await?;
+assert_eq!(client.incr("n", 5).await?, Some(15));
+let many = client.get_multi(&["greeting", "n"]).await?;
+# Ok(())
+# }
 ```
 
-Use the text protocol or a unix socket by adjusting the config:
+Custom configuration (group, socket dir, protocol, pool size):
 
 ```rust
-use memcache::{Config, Protocol};
+use memcache::sidecar::{MeshConfig, SidecarClient};
+use memcache::Protocol;
 
-let text = Config::tcp("127.0.0.1", 11211).with_protocol(Protocol::Text);
-let uds  = Config::unix("/var/run/mc.sock").with_protocol(Protocol::Binary);
+# fn demo() -> memcache::Result<()> {
+let cfg = MeshConfig::new("my_ns")
+    .with_group("cache.service.friendship.pool.yf")
+    .with_protocol(Protocol::Binary)
+    .with_min_connections(2)     // default; established at startup, kept topped up
+    .with_max_connections(128);  // default; pool grows on demand up to this
+let client = SidecarClient::from_config(cfg)?;
+# Ok(())
+# }
 ```
 
-## byMesh: connecting via the socks registry
+### Discovery and endpoint rediscovery
 
-In the mesh deployment the sidecar advertises each backend as a registry file
-under `/tmp/breeze/socks/` (`DEFAULT_SOCKS_DIR`). For memcached the file name is:
+The mesh advertises each resource as a registry file under
+`/tmp/breeze/socks/` (`sidecar::DEFAULT_SOCKS_DIR`):
 
 ```text
 config.example.com+3+config+v1+<group>+all:<namespace>@mc:<port>@cs
 ```
 
-The SDK parses this name **directly** — no remote/vintage fetch. Parsing follows
-breeze's `context::Quadruple`: split the name by `@` into `service@protocol@backend`,
-then split the protocol by `:`; a numeric port means TCP `127.0.0.1:<port>`,
-otherwise it is a sibling `<token>.sock` unix socket.
+The SDK parses this name **directly** — no remote/vintage fetch. A numeric
+port means TCP `127.0.0.1:<port>`; otherwise a sibling `<token>.sock` unix
+socket. `SidecarClient::from_sock(path)` parses one specific registry file.
+
+Mesh ports are normally fixed per service, but occasionally reassigned. The
+client follows registry changes: new connections dial the new endpoint and
+idle connections to the old one are drained. Scanning is **shared per
+directory** — all clients watching the same socks directory share one
+background task and one scan per 5 seconds, so a process with hundreds of
+namespaces costs one timer and one directory read, not one per namespace.
+`SidecarClient::refresh_endpoint()` forces a rescan on demand and
+`SidecarClient::current_endpoint()` reports the endpoint in use.
+
+## Direct backend mode
+
+No mesh: the SDK connects to the backends directly and routes keys itself.
+`Shards` uses the same hash/distribution algorithms as the breeze mesh
+(`direct::sharding`, ported from `breeze/sharding`), so a key maps to the
+same backend whether routed by this client or by the mesh:
 
 ```rust
-use memcache::Config;
+use memcache::direct::{DirectClient, ServerConfig, Shards};
 
-// Parse a specific sock file directly (full path or bare name):
-let a = Config::sock(
-    "/tmp/breeze/socks/config.example.com+3+config+v1+\
-     cache.service.friendship.pool.yf+all:relation_cluster_exposure@mc:9461@cs",
-)?;
-
-// Or discover it by group + namespace under the default socks dir:
-let b = Config::mesh("cache.service.friendship.pool.yf", "relation_cluster_exposure")?;
-
-// Custom socks directory:
-let c = Config::mesh_in("/data1/breeze/socks", "grp", "ns")?;
-# Ok::<(), memcache::Error>(())
+# fn demo() -> memcache::Result<()> {
+let shards = Shards::new(
+    "crc32", "modula",
+    vec!["10.0.0.1:11211".to_string(), "10.0.0.2:11211".to_string()],
+    vec![
+        DirectClient::connect(ServerConfig::new("10.0.0.1:11211")?)?,
+        DirectClient::connect(ServerConfig::new("10.0.0.2:11211")?)?,
+    ],
+);
+// shardingSupport.getClient(key) style:
+# async fn run(shards: Shards) -> memcache::Result<()> {
+shards.get_client("u:42").set("u:42", "data", 60u32).await?;
+# Ok(())
+# }
+# Ok(())
+# }
 ```
 
-These constructors default to the binary protocol, matching the mesh
-`PingPongMemcachedBinaryClient`.
+## Replay mode (feature `direct-tcp`)
 
-### Endpoint rediscovery
+For replay/comparison topologies the SDK talks directly to recorded
+memcached nodes over the text protocol:
 
-Mesh ports are normally fixed per service, but occasionally reassigned. When
-the config was built from the socks registry (`Config::mesh` / `mesh_in` /
-`sock`), the client keeps the discovery coordinates and follows registry
-changes: new connections dial the new endpoint and idle connections to the
-old one are drained.
+- `replay::ReplayConnection` — one persistent `TcpStream` for a whole read
+  sequence (`get` / `get_multi`), so the replay proxy can lane-match against
+  a recorded connection's command stream. Read-only, bounded, and dropped on
+  any error.
+- `replay::MemcachePool` + `replay::new_compat_hash` — the source service's
+  crc32 + modula node selection; build from the master list discovered via
+  the cacheservice statics config ([`cacheservice::CacheServiceConfig`]).
 
-Scanning is **shared per directory**: all clients watching the same socks
-directory share a single background task and a single scan every 5 seconds,
-so a process with hundreds of namespaces costs one timer and one directory
-read, not one per namespace. The scan task starts on first use and stops when
-the last client watching the directory is dropped. Clients are only woken
-when the registry snapshot actually changes.
+## Unified proxy
 
-`Client::refresh_endpoint()` forces a rescan on demand (e.g. after a burst of
-connect failures) and `Client::current_endpoint()` reports the endpoint
-currently in use.
+`memcache::Client` is an enum over the sidecar and direct clients, exposing
+the whole operation surface regardless of access mode:
+
+```rust
+use memcache::Client;
+use memcache::sidecar::SidecarClient;
+
+# async fn demo(direct: memcache::direct::DirectClient) -> memcache::Result<()> {
+let sidecar = SidecarClient::connect("my_ns")?;
+let clients: Vec<Client> = vec![sidecar.into(), direct.into()];
+for client in &clients {
+    let _ = client.get("key").await?;
+}
+# Ok(())
+# }
+```
 
 ## API
-
-The client exposes the `CacheAble`-equivalent surface plus a few extras:
 
 | Method | Description |
 | --- | --- |
@@ -145,10 +160,26 @@ The client exposes the `CacheAble`-equivalent surface plus a few extras:
 | `touch` | update expiration only |
 | `flush_all` / `version` | server admin |
 
+## Availability and pooling (pooled modes)
+
+- Connection pooling via [`deadpool`](https://docs.rs/deadpool) with
+  request/response correlation: the binary protocol matches each response to
+  its request by opaque token, and connections that fail, time out, or show
+  a desynced frame are dropped instead of being recycled.
+- Pool floor: a single shared background task keeps every client topped up
+  to `min_connections` (not one task per client), so long-idle clients do
+  not pay reconnect latency when traffic resumes.
+- TCP keepalive reaps half-open connections to a crashed mesh before they
+  can stall a request.
+- Per-operation timeouts and key validation.
+- Java-compatible value flag markers (int/long/bool/string), so values are
+  interoperable with the `cn.vika.memcached` / `com.schooner.MemCached`
+  clients.
+
 ## Expiration
 
-`Expiration` follows memcached semantics: `0` = never, values up to 30 days are
-relative seconds, larger values are absolute unix timestamps. Any
+`Expiration` follows memcached semantics: `0` = never, values up to 30 days
+are relative seconds, larger values are absolute unix timestamps. Any
 `impl Into<Expiration>` is accepted, including `u32` seconds and
 `std::time::Duration`.
 
@@ -157,8 +188,8 @@ relative seconds, larger values are absolute unix timestamps. Any
 Stored values are bytes plus a `u32` flags field. `ToMemcacheValue` is
 implemented for `&[u8]` / `Vec<u8>` / `Bytes` / `&str` / `String` (stored
 untagged) and for `i32` / `i64` / `u64` / `bool` (tagged with the Java marker
-bits). `Value` offers `as_bytes` / `as_string` / `as_i64` / `as_u64` / `as_bool`
-decoders.
+bits). `Value` offers `as_bytes` / `as_string` / `as_i64` / `as_u64` /
+`as_bool` decoders.
 
 ## Logging
 
@@ -169,25 +200,26 @@ mesh `MeshMemcacheTemplate` format:
 mc mesh <method> error ,namespace:<namespace> ,key: <key>
 ```
 
-Set the namespace with `Config::with_namespace` (or `Config::mesh`, which sets
+Set the namespace with `Config::with_namespace` (or `MeshConfig`, which sets
 it automatically) so the logs identify the client. Install any `tracing`
 subscriber to route these logs to your sink.
 
 ## Not implemented (out of scope)
 
-- Client-side multi-server sharding / consistent hashing / failover (the *byTcp*
-  path). High availability is provided by the pool and the mesh sidecar.
 - QuickLZ compression (`F_COMPRESSED`) and Java object serialization
-  (`F_SERIALIZED`): such values are surfaced as `Error::Unsupported` on decode.
+  (`F_SERIALIZED`): such values are surfaced as `Error::Unsupported` on
+  decode.
 - SASL authentication and UDP transport.
 
 ## Development
 
 ```bash
 cargo fmt --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --features direct-tcp -- -D warnings
+cargo test --features direct-tcp
 ```
 
-The test suite includes an in-process fake memcached server that exercises the
-full request/response path for both protocols; no external server is required.
+The test suite includes an in-process fake memcached server that exercises
+the full request/response path for both protocols; no external server is
+required. Integration tests against a real memcached (Docker) are gated
+behind `direct-tcp` and `#[ignore]`.

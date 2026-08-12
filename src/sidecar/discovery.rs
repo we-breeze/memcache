@@ -14,13 +14,25 @@
 //! otherwise it is a unix socket `<dir>/<token-or-service>.sock`.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::Endpoint;
 use crate::error::{Error, Result};
 
-/// Default directory the mesh sidecar writes socks registry files to.
-pub const DEFAULT_SOCKS_DIR: &str = "/tmp/breeze/socks";
+pub use super::config::DEFAULT_SOCKS_DIR;
+
+/// How to rediscover the mesh endpoint: rescan the socks registry in `dir`
+/// for the entry matching `group`/`namespace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MeshDiscovery {
+    /// Directory holding the socks registry files.
+    pub(crate) dir: PathBuf,
+    /// Service group to match (the `+<group>+all:` suffix), if known. `None`
+    /// (from a bare sock-file path) matches only by namespace.
+    pub(crate) group: Option<String>,
+    /// Cache namespace to match.
+    pub(crate) namespace: String,
+}
 
 /// Protocol token used by memcached registry files.
 const MC_PROTOCOL: &str = "mc";

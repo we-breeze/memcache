@@ -1,8 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::error::{Error, Result};
-use crate::mesh;
+use crate::sidecar::discovery::MeshDiscovery;
 
 /// Wire protocol spoken to the memcached endpoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -28,21 +27,26 @@ pub enum Endpoint {
 /// Mirrors the settings applied by `PingPongMemcachedBinaryClient` /
 /// `TextMemcacheClient` in breeze-sdk-core: a single endpoint, a bounded
 /// connection pool, TCP_NODELAY, and socket-level timeouts.
+///
+/// This is the low-level, single-endpoint engine configuration shared by
+/// both access modes; applications usually build one via
+/// [`crate::sidecar::MeshConfig`] (mesh discovery) or
+/// [`crate::direct::ServerConfig`] (direct backend).
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Endpoint to connect to.
     pub endpoint: Endpoint,
     /// Mesh rediscovery coordinates, set when the endpoint was discovered via
-    /// the socks registry ([`Config::mesh`] / [`Config::mesh_in`] /
-    /// [`Config::sock`]). When present, the client periodically rescans the
-    /// registry and follows endpoint changes (e.g. a mesh port reassignment);
-    /// pooled connections to the old endpoint are drained on change.
-    pub mesh_discovery: Option<MeshDiscovery>,
+    /// the socks registry (see [`crate::sidecar`]). When present, the client
+    /// periodically rescans the registry and follows endpoint changes (e.g.
+    /// a mesh port reassignment); pooled connections to the old endpoint are
+    /// drained on change.
+    pub(crate) mesh_discovery: Option<MeshDiscovery>,
     /// Protocol to speak.
     pub protocol: Protocol,
     /// Namespace used to identify this client in logs (matches the mesh
-    /// `namespace`). Empty by default; set by [`Config::mesh`] or
-    /// [`Config::with_namespace`].
+    /// `namespace`). Empty by default; set by [`Config::with_namespace`] (or
+    /// [`crate::sidecar::MeshConfig`], which sets it automatically).
     pub namespace: String,
     /// Maximum number of pooled connections.
     pub max_connections: usize,
@@ -76,19 +80,6 @@ pub struct Config {
     pub validate_keys: bool,
 }
 
-/// How to rediscover the mesh endpoint: rescan the socks registry in `dir`
-/// for the entry matching `group`/`namespace`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeshDiscovery {
-    /// Directory holding the socks registry files.
-    pub dir: PathBuf,
-    /// Service group to match (the `+<group>+all:` suffix), if known. `None`
-    /// (from [`Config::sock`]) matches only by namespace.
-    pub group: Option<String>,
-    /// Cache namespace to match.
-    pub namespace: String,
-}
-
 /// memcached's hard key-length limit, in bytes.
 pub const MAX_KEY_LEN: usize = 250;
 
@@ -104,64 +95,6 @@ impl Config {
     /// Build a config for a unix domain socket with sensible defaults.
     pub fn unix(path: impl Into<PathBuf>) -> Self {
         Self::new(Endpoint::Unix { path: path.into() })
-    }
-
-    /// Build a config by **directly parsing** a mesh socks registry file
-    /// (byMesh path). The file name encodes the endpoint, e.g.
-    /// `…+<group>+all:<namespace>@mc:<port>@cs`; it is parsed in place with no
-    /// remote/vintage fetch. A numeric port yields a TCP endpoint to
-    /// `127.0.0.1:<port>`; otherwise a sibling `<token>.sock` unix socket.
-    ///
-    /// `path` may be the full path to the file or just its name (resolved
-    /// against [`mesh::DEFAULT_SOCKS_DIR`]). Defaults to the binary protocol,
-    /// matching the mesh `PingPong` client.
-    pub fn sock(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let (dir, name) = match (path.parent(), path.file_name()) {
-            (Some(parent), Some(name)) if !parent.as_os_str().is_empty() => (parent, name),
-            (_, Some(name)) => (Path::new(mesh::DEFAULT_SOCKS_DIR), name),
-            _ => {
-                return Err(Error::MeshDiscovery(format!(
-                    "sock path has no file name: {}",
-                    path.display()
-                )));
-            }
-        };
-        let name = name
-            .to_str()
-            .ok_or_else(|| Error::MeshDiscovery("sock file name is not UTF-8".into()))?;
-        let endpoint = mesh::endpoint_from_name(dir, name)?;
-        let namespace = mesh::namespace_from_name(name).map(str::to_string);
-        let mut config = Self::new(endpoint);
-        config.mesh_discovery = Some(MeshDiscovery {
-            dir: dir.to_path_buf(),
-            group: mesh::group_from_name(name).map(str::to_string),
-            namespace: namespace.clone().unwrap_or_default(),
-        });
-        if let Some(namespace) = namespace {
-            config.namespace = namespace;
-        }
-        Ok(config)
-    }
-
-    /// Discover the mesh memcached endpoint for `group`/`namespace` by scanning
-    /// the default socks directory ([`mesh::DEFAULT_SOCKS_DIR`]). Local file
-    /// access only — no remote fetch.
-    pub fn mesh(group: &str, namespace: &str) -> Result<Self> {
-        Self::mesh_in(mesh::DEFAULT_SOCKS_DIR, group, namespace)
-    }
-
-    /// Like [`Config::mesh`] but scans `dir` instead of the default directory.
-    pub fn mesh_in(dir: impl AsRef<Path>, group: &str, namespace: &str) -> Result<Self> {
-        let dir = dir.as_ref();
-        let endpoint = mesh::discover(dir, group, namespace)?;
-        let mut config = Self::new(endpoint).with_namespace(namespace);
-        config.mesh_discovery = Some(MeshDiscovery {
-            dir: dir.to_path_buf(),
-            group: Some(group.to_string()),
-            namespace: namespace.to_string(),
-        });
-        Ok(config)
     }
 
     /// Build a config from an [`Endpoint`] with default pool/timeout settings.

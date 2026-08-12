@@ -21,8 +21,8 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::Notify;
 
+use super::discovery::{self, SockKey};
 use crate::config::Endpoint;
-use crate::mesh::{self, SockKey};
 
 /// How often each watched socks directory is rescanned.
 const SCAN_INTERVAL: Duration = Duration::from_secs(5);
@@ -45,7 +45,7 @@ impl DirectoryWatcher {
     /// notifying all watchers if it changed. Used by manual refreshes; the
     /// background task does the same on its interval.
     pub(crate) fn rescan(&self) {
-        let scanned = mesh::scan_all(&self.dir);
+        let scanned = discovery::scan_all(&self.dir);
         if **self.snapshot.load() != scanned {
             self.snapshot.store(Arc::new(scanned));
             self.notify.notify_waiters();
@@ -110,7 +110,7 @@ fn registry() -> &'static Mutex<HashMap<PathBuf, ScannerEntry>> {
 pub(crate) fn watch(dir: PathBuf) -> DirectoryWatcher {
     let mut registry = registry().lock().unwrap_or_else(|err| err.into_inner());
     let entry = registry.entry(dir.clone()).or_insert_with(|| {
-        let snapshot: Snapshot = Arc::new(ArcSwap::from_pointee(mesh::scan_all(&dir)));
+        let snapshot: Snapshot = Arc::new(ArcSwap::from_pointee(discovery::scan_all(&dir)));
         let notify = Arc::new(Notify::new());
         let task = {
             let snapshot = snapshot.clone();
@@ -121,7 +121,7 @@ pub(crate) fn watch(dir: PathBuf) -> DirectoryWatcher {
                 ticker.tick().await; // skip the immediate first tick
                 loop {
                     ticker.tick().await;
-                    let scanned = mesh::scan_all(&dir);
+                    let scanned = discovery::scan_all(&dir);
                     // Only broadcast on an actual change, so idle watchers
                     // are never woken.
                     if **snapshot.load() != scanned {

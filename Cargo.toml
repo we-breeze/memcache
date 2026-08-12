@@ -2,7 +2,7 @@
 name = "memcache"
 version = "0.1.0"
 edition = "2024"
-description = "High-performance async memcached client (text + binary protocol) for the byMesh sidecar path"
+description = "High-performance, high-availability async memcached client for the example breeze platform (sidecar / direct / replay modes, text + binary protocols)"
 license = "MIT"
 
 [dependencies]
@@ -16,9 +16,12 @@ socket2 = { version = "0.6.5", features = ["all"] }
 memchr = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
+md5 = "0.7"
+rand = "0.8"
 
 [features]
 direct-tcp = ["memchr"]
+memchr = ["dep:memchr"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

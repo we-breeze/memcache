@@ -1,9 +1,10 @@
-//! Direct-TCP text-protocol client + crc32/modula node-selection pool for the
-//! `example-abtest` user-info cache.
+//! Replay mode: direct-TCP text-protocol client + crc32/modula node-selection
+//! pool for replay/comparison topologies (e.g. the `example-abtest` user-info
+//! cache).
 //!
-//! This is the direct-TCP path used under replay/comparison topologies where
-//! the target connects directly to the recorded memcached nodes — it is NOT
-//! the mesh sidecar path. It reproduces the source service's
+//! This is the path used under replay/comparison topologies where the target
+//! connects directly to the recorded memcached nodes — it is NOT the mesh
+//! sidecar path. It reproduces the source service's
 //! `SockIOPool.NEW_COMPAT_HASH` (crc32 + modula) node selection so the replay
 //! proxy can match recorded memcached exchanges by (target host, key).
 //!
@@ -12,7 +13,7 @@
 //! (see the `vintage` crate's `get_cacheservice_masters`). Under replay the
 //! lookup returns the recorded fake IPs; under comparison/production it
 //! returns real addresses. [`MemcachePool::from_masters`] builds the pool from
-//! that list. [`MemcachePool::default_example_abtest`] is retained only as a
+//! that list. `MemcachePool::default_example_abtest` (test-only) is retained only as a
 //! test fixture sourced from a recorded vintage-node list — it is not used at
 //! runtime.
 
@@ -23,11 +24,15 @@ use tokio::net::TcpStream;
 
 const READ_BUFFER_BYTES: usize = 8 * 1024;
 const MAX_VALUE_BYTES: usize = 1024 * 1024;
+/// Per-command deadline for persistent replay connections.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MemcacheError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("timeout: {0}")]
+    Timeout(String),
     #[error("value not found for key {0:?}")]
     NotFound(String),
     #[error("server error: {0}")]
@@ -36,6 +41,148 @@ pub enum MemcacheError {
     TooLarge(usize),
     #[error("malformed response")]
     Malformed,
+}
+
+/// A persistent replay connection that reuses one `TcpStream` for a sequence
+/// of text-protocol reads.
+///
+/// The source Java service uses a pooled memcached connection that sends many
+/// `get` commands sequentially over the same socket; a replay proxy lanes a
+/// target connection to a recorded one and only advances the lane when the
+/// target's next command matches the next recorded command ON THAT LANE.
+/// `ReplayConnection` mirrors that topology by holding one `TcpStream` for a
+/// whole command sequence, so the proxy can lane-match it against a recorded
+/// connection's command stream.
+///
+/// The connection is bounded (per-command deadline, buffered-read cap) and
+/// deliberately fragile: any error surfaces to the caller, which drops the
+/// connection and degrades gracefully (no retry, no reconnection).
+/// Read-only by design (`get` / `get_multi` only), so it is safe to point at
+/// a production backend during comparison runs.
+pub struct ReplayConnection {
+    stream: TcpStream,
+    read_buf: bytes::BytesMut,
+}
+
+impl ReplayConnection {
+    /// Connect to the memcached endpoint and return a reusable connection.
+    pub async fn connect(host: &str, port: u16) -> Result<Self, MemcacheError> {
+        let addr = format!("{host}:{port}");
+        let stream = tokio::time::timeout(COMMAND_TIMEOUT, TcpStream::connect(&addr))
+            .await
+            .map_err(|_| MemcacheError::Timeout(format!("connect timeout to {addr}")))??;
+        let _ = stream.set_nodelay(true);
+        Ok(ReplayConnection {
+            stream,
+            read_buf: bytes::BytesMut::with_capacity(READ_BUFFER_BYTES),
+        })
+    }
+
+    /// Fetch a single value; `Ok(None)` if the key does not exist.
+    pub async fn get(&mut self, key: &str) -> Result<Option<MemcacheGet>, MemcacheError> {
+        let mut values = self.get_multi(&[key]).await?;
+        Ok(values.pop())
+    }
+
+    /// Fetch several values in one `get` round-trip; missing keys are
+    /// omitted (results come back in request order for present keys).
+    pub async fn get_multi(&mut self, keys: &[&str]) -> Result<Vec<MemcacheGet>, MemcacheError> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut request = String::from("get");
+        for key in keys {
+            request.push(' ');
+            request.push_str(key);
+        }
+        request.push_str("\r\n");
+        tokio::time::timeout(COMMAND_TIMEOUT, self.stream.write_all(request.as_bytes()))
+            .await
+            .map_err(|_| MemcacheError::Timeout("write timeout".into()))??;
+
+        let mut found: Vec<(String, MemcacheGet)> = Vec::new();
+        loop {
+            let line = self.read_line().await?;
+            if line.as_ref() == b"END" {
+                break;
+            }
+            let Some(rest) = line.strip_prefix(b"VALUE ") else {
+                return Err(MemcacheError::Malformed);
+            };
+            let mut tokens = rest.split(|b| *b == b' ');
+            let key = tokens.next().ok_or(MemcacheError::Malformed)?;
+            let flags = parse_u32(tokens.next())?;
+            let len = parse_u32(tokens.next())? as usize;
+            if len > MAX_VALUE_BYTES {
+                return Err(MemcacheError::TooLarge(len));
+            }
+            let data = self.read_exact(len).await?;
+            let trailer = self.read_exact(2).await?;
+            if trailer.as_ref() != b"\r\n" {
+                return Err(MemcacheError::Malformed);
+            }
+            let key = String::from_utf8_lossy(key).into_owned();
+            found.push((
+                key.clone(),
+                MemcacheGet {
+                    key,
+                    flags,
+                    value: data.to_vec(),
+                },
+            ));
+        }
+        // Return values in request order, skipping misses.
+        Ok(keys
+            .iter()
+            .filter_map(|key| found.iter().find(|(k, _)| k == key).map(|(_, v)| v))
+            .map(|get| MemcacheGet {
+                key: get.key.clone(),
+                flags: get.flags,
+                value: get.value.clone(),
+            })
+            .collect())
+    }
+
+    async fn fill(&mut self) -> Result<usize, MemcacheError> {
+        if self.read_buf.len() > MAX_VALUE_BYTES + 256 {
+            return Err(MemcacheError::TooLarge(self.read_buf.len()));
+        }
+        let read = tokio::time::timeout(COMMAND_TIMEOUT, self.stream.read_buf(&mut self.read_buf))
+            .await
+            .map_err(|_| MemcacheError::Timeout("read timeout".into()))??;
+        Ok(read)
+    }
+
+    async fn read_exact(&mut self, n: usize) -> Result<bytes::Bytes, MemcacheError> {
+        while self.read_buf.len() < n {
+            if self.fill().await? == 0 {
+                return Err(MemcacheError::Malformed);
+            }
+        }
+        Ok(self.read_buf.split_to(n).freeze())
+    }
+
+    async fn read_line(&mut self) -> Result<bytes::Bytes, MemcacheError> {
+        let mut searched = 0;
+        loop {
+            if let Some(offset) = memchr::memmem::find(&self.read_buf[searched..], b"\r\n") {
+                let end = searched + offset;
+                let mut line = self.read_buf.split_to(end + 2);
+                line.truncate(end);
+                return Ok(line.freeze());
+            }
+            searched = self.read_buf.len().saturating_sub(1);
+            if self.fill().await? == 0 {
+                return Err(MemcacheError::Malformed);
+            }
+        }
+    }
+}
+
+fn parse_u32(token: Option<&[u8]>) -> Result<u32, MemcacheError> {
+    let token = token.ok_or(MemcacheError::Malformed)?;
+    let text = std::str::from_utf8(token).map_err(|_| MemcacheError::Malformed)?;
+    text.parse::<u32>().map_err(|_| MemcacheError::Malformed)
 }
 
 /// A single-entry memcached get result.

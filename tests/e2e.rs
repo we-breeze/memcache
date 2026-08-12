@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use memcache::sidecar::{MeshConfig, SidecarClient};
 use memcache::{CasValue, Client, Config, Endpoint, Protocol};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -378,8 +379,8 @@ async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io
     }
 }
 
-fn client(port: u16, protocol: Protocol) -> Client {
-    Client::new(
+fn client(port: u16, protocol: Protocol) -> SidecarClient {
+    SidecarClient::new(
         Config::tcp("127.0.0.1", port)
             .with_protocol(protocol)
             .with_max_connections(2),
@@ -464,7 +465,7 @@ async fn text_protocol_crud() {
 #[tokio::test]
 async fn prewarms_min_connections() {
     let port = spawn(Protocol::Binary).await;
-    let client = Client::new(
+    let client = SidecarClient::new(
         Config::tcp("127.0.0.1", port)
             .with_protocol(Protocol::Binary)
             .with_min_connections(5)
@@ -491,6 +492,94 @@ async fn prewarms_min_connections() {
 #[tokio::test]
 async fn binary_protocol_crud() {
     run_crud_suite(Protocol::Binary).await;
+}
+
+/// Direct mode: `DirectClient` speaks to one backend over the pooled engine,
+/// and `Shards` routes keys to a stable backend via the mesh's hash +
+/// distribution algorithms. The unified `Client` enum works over both modes.
+#[tokio::test]
+async fn direct_mode_and_shards() {
+    use memcache::direct::{DirectClient, ServerConfig, Shards};
+
+    let port_a = spawn(Protocol::Binary).await;
+    let port_b = spawn(Protocol::Binary).await;
+    let client_a =
+        DirectClient::connect(ServerConfig::new(&format!("127.0.0.1:{port_a}")).unwrap()).unwrap();
+    let client_b =
+        DirectClient::connect(ServerConfig::new(&format!("127.0.0.1:{port_b}")).unwrap()).unwrap();
+
+    // Single-backend CRUD through the direct client.
+    assert!(client_a.set("k", "v", 60u32).await.unwrap());
+    assert_eq!(
+        client_a
+            .get("k")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_string()
+            .unwrap(),
+        "v"
+    );
+
+    // Shard routing is stable per key and covers both backends: write
+    // through the router, then confirm each key is present on exactly the
+    // backend the router picked.
+    let shards = Shards::new(
+        "crc32",
+        "modula",
+        vec![format!("127.0.0.1:{port_a}"), format!("127.0.0.1:{port_b}")],
+        vec![client_a.clone(), client_b.clone()],
+    );
+    let keys: Vec<String> = (0..50).map(|i| format!("key:{i}")).collect();
+    let mut used = [false, false];
+    for key in &keys {
+        shards.get_client(key).set(key, "x", 60u32).await.unwrap();
+    }
+    for key in &keys {
+        let on_a = client_a.get(key).await.unwrap().is_some();
+        let on_b = client_b.get(key).await.unwrap().is_some();
+        assert!(on_a ^ on_b, "{key} must live on exactly one backend");
+        used[on_b as usize] = true;
+        // Routing is stable: the router still picks the backend holding the
+        // key (writing through the router and reading directly agree).
+        assert!(
+            shards.get_client(key).get(key).await.unwrap().is_some(),
+            "{key} routed inconsistently"
+        );
+    }
+    assert!(used[0] && used[1], "both backends should receive keys");
+
+    // Write-then-read through the router is consistent.
+    shards
+        .get_client("rk")
+        .set("rk", "rv", 60u32)
+        .await
+        .unwrap();
+    assert_eq!(
+        shards
+            .get_client("rk")
+            .get("rk")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_string()
+            .unwrap(),
+        "rv"
+    );
+
+    // The unified client enum works over either mode.
+    let unified: Client = client_a.into();
+    assert_eq!(
+        unified
+            .get("k")
+            .await
+            .unwrap()
+            .unwrap()
+            .as_string()
+            .unwrap(),
+        "v"
+    );
+    assert!(unified.as_direct().is_some());
 }
 
 /// Spawn a misbehaving binary server: for each connection it answers the
@@ -546,7 +635,7 @@ async fn spawn_desyncing_binary_server() -> u16 {
 #[tokio::test]
 async fn binary_desynced_frame_drops_connection() {
     let port = spawn_desyncing_binary_server().await;
-    let client = Client::new(
+    let client = SidecarClient::new(
         Config::tcp("127.0.0.1", port)
             .with_protocol(Protocol::Binary)
             .with_max_connections(1),
@@ -610,7 +699,7 @@ async fn binary_timeout_drops_connection() {
         }
     });
 
-    let client = Client::new(
+    let client = SidecarClient::new(
         Config::tcp("127.0.0.1", port)
             .with_protocol(Protocol::Binary)
             .with_max_connections(1)
@@ -643,11 +732,12 @@ async fn mesh_rediscovery_follows_port_change() {
     let port_a = spawn(Protocol::Binary).await;
     std::fs::write(dir.path().join(sock_name(port_a)), []).unwrap();
 
-    let client = Client::new(
-        // Disable min-connection maintenance so the test observes the raw
-        // pool drain on endpoint change, not the maintainer refilling it.
-        Config::mesh_in(dir.path(), "grp", "nsX")
-            .unwrap()
+    // Disable min-connection maintenance so the test observes the raw
+    // pool drain on endpoint change, not the maintainer refilling it.
+    let client = SidecarClient::from_config(
+        MeshConfig::new("nsX")
+            .with_group("grp")
+            .with_socket_dir(dir.path())
             .with_min_connections(0),
     )
     .unwrap();
@@ -722,7 +812,7 @@ async fn logs_error_in_mesh_format_on_request_failure() {
     let _guard = tracing::subscriber::set_default(subscriber);
 
     // Nothing is listening on port 1, so the request fails during connect.
-    let client = Client::new(
+    let client = SidecarClient::new(
         Config::tcp("127.0.0.1", 1)
             .with_namespace("nstest")
             .with_max_connections(1)
