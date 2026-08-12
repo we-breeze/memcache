@@ -92,17 +92,19 @@ impl Response {
     }
 }
 
-/// Assemble a request frame into a byte buffer.
-fn build_request(
+/// Assemble a request frame into `buf` (appended; caller clears first).
+#[allow(clippy::too_many_arguments)]
+fn build_request_into(
+    buf: &mut Vec<u8>,
     opcode: u8,
     key: &[u8],
     extras: &[u8],
     value: &[u8],
     cas: u64,
     opaque: u32,
-) -> Vec<u8> {
+) {
     let body_len = extras.len() + key.len() + value.len();
-    let mut buf = Vec::with_capacity(HEADER_LEN + body_len);
+    buf.reserve(HEADER_LEN + body_len);
     buf.push(REQUEST_MAGIC);
     buf.push(opcode);
     buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
@@ -115,7 +117,27 @@ fn build_request(
     buf.extend_from_slice(extras);
     buf.extend_from_slice(key);
     buf.extend_from_slice(value);
-    buf
+}
+
+/// Assemble a request frame into the connection's reusable scratch buffer
+/// and send it. The scratch buffer is returned to the connection afterwards,
+/// so the next request on this connection does not allocate.
+#[allow(clippy::too_many_arguments)]
+async fn send_request(
+    conn: &mut Connection,
+    opcode: u8,
+    key: &[u8],
+    extras: &[u8],
+    value: &[u8],
+    cas: u64,
+    opaque: u32,
+) -> Result<()> {
+    let mut buf = std::mem::take(&mut conn.write_buf);
+    buf.clear();
+    build_request_into(&mut buf, opcode, key, extras, value, cas, opaque);
+    let result = conn.send(&buf).await;
+    conn.write_buf = buf;
+    result
 }
 
 /// Read and parse a single response frame.
@@ -178,15 +200,16 @@ pub(crate) async fn store(
         &[]
     };
     let opaque = conn.next_opaque();
-    let request = build_request(
+    send_request(
+        conn,
         command.binary_opcode(),
         key.as_bytes(),
         extras,
         value.as_bytes(),
         cas.unwrap_or(0),
         opaque,
-    );
-    conn.send(&request).await?;
+    )
+    .await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -199,8 +222,7 @@ pub(crate) async fn store(
 
 pub(crate) async fn get(conn: &mut Connection, key: &str) -> Result<Option<Value>> {
     let opaque = conn.next_opaque();
-    let request = build_request(opcode::GET, key.as_bytes(), &[], &[], 0, opaque);
-    conn.send(&request).await?;
+    send_request(conn, opcode::GET, key.as_bytes(), &[], &[], 0, opaque).await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -213,8 +235,7 @@ pub(crate) async fn get(conn: &mut Connection, key: &str) -> Result<Option<Value
 
 pub(crate) async fn get_cas(conn: &mut Connection, key: &str) -> Result<Option<CasValue>> {
     let opaque = conn.next_opaque();
-    let request = build_request(opcode::GET, key.as_bytes(), &[], &[], 0, opaque);
-    conn.send(&request).await?;
+    send_request(conn, opcode::GET, key.as_bytes(), &[], &[], 0, opaque).await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -237,20 +258,24 @@ pub(crate) async fn get_multi(
     // Hit responses echo their request's opaque so each value can be matched
     // to its key; any unexpected frame means the connection is out of sync.
     let base_opaque = conn.next_opaque();
-    let mut request = Vec::new();
+    let mut request = std::mem::take(&mut conn.write_buf);
+    request.clear();
     for (index, key) in keys.iter().enumerate() {
-        request.extend_from_slice(&build_request(
+        build_request_into(
+            &mut request,
             opcode::GETKQ,
             key.as_bytes(),
             &[],
             &[],
             0,
             base_opaque + index as u32,
-        ));
+        );
     }
     let noop_opaque = base_opaque + keys.len() as u32;
-    request.extend_from_slice(&build_request(opcode::NOOP, &[], &[], &[], 0, noop_opaque));
-    conn.send(&request).await?;
+    build_request_into(&mut request, opcode::NOOP, &[], &[], &[], 0, noop_opaque);
+    let send_result = conn.send(&request).await;
+    conn.write_buf = request;
+    send_result?;
 
     let mut map = HashMap::with_capacity(keys.len());
     loop {
@@ -280,8 +305,7 @@ pub(crate) async fn get_multi(
 
 pub(crate) async fn delete(conn: &mut Connection, key: &str) -> Result<bool> {
     let opaque = conn.next_opaque();
-    let request = build_request(opcode::DELETE, key.as_bytes(), &[], &[], 0, opaque);
-    conn.send(&request).await?;
+    send_request(conn, opcode::DELETE, key.as_bytes(), &[], &[], 0, opaque).await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -309,8 +333,7 @@ pub(crate) async fn incr_decr(
         opcode::DECREMENT
     };
     let opaque = conn.next_opaque();
-    let request = build_request(op, key.as_bytes(), &extras, &[], 0, opaque);
-    conn.send(&request).await?;
+    send_request(conn, op, key.as_bytes(), &extras, &[], 0, opaque).await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -333,8 +356,7 @@ pub(crate) async fn incr_decr(
 pub(crate) async fn touch(conn: &mut Connection, key: &str, expire: Expiration) -> Result<bool> {
     let extras = expire.to_wire().to_be_bytes();
     let opaque = conn.next_opaque();
-    let request = build_request(opcode::TOUCH, key.as_bytes(), &extras, &[], 0, opaque);
-    conn.send(&request).await?;
+    send_request(conn, opcode::TOUCH, key.as_bytes(), &extras, &[], 0, opaque).await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -347,8 +369,7 @@ pub(crate) async fn touch(conn: &mut Connection, key: &str, expire: Expiration) 
 
 pub(crate) async fn flush_all(conn: &mut Connection) -> Result<()> {
     let opaque = conn.next_opaque();
-    let request = build_request(opcode::FLUSH, &[], &[], &[], 0, opaque);
-    conn.send(&request).await?;
+    send_request(conn, opcode::FLUSH, &[], &[], &[], 0, opaque).await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -361,8 +382,7 @@ pub(crate) async fn flush_all(conn: &mut Connection) -> Result<()> {
 
 pub(crate) async fn version(conn: &mut Connection) -> Result<String> {
     let opaque = conn.next_opaque();
-    let request = build_request(opcode::VERSION, &[], &[], &[], 0, opaque);
-    conn.send(&request).await?;
+    send_request(conn, opcode::VERSION, &[], &[], &[], 0, opaque).await?;
 
     let response = read_response(conn).await?;
     response.check_opaque(opaque)?;
@@ -379,7 +399,8 @@ mod tests {
 
     #[test]
     fn builds_request_header_layout() {
-        let request = build_request(opcode::SET, b"key", &[0u8; 8], b"val", 7, 42);
+        let mut request = Vec::new();
+        build_request_into(&mut request, opcode::SET, b"key", &[0u8; 8], b"val", 7, 42);
         assert_eq!(request[0], REQUEST_MAGIC);
         assert_eq!(request[1], opcode::SET);
         assert_eq!(u16::from_be_bytes([request[2], request[3]]), 3); // key len

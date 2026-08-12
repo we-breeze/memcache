@@ -157,7 +157,7 @@ impl SidecarClient {
 
     /// Fetch a single value.
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
-        self.run("get", key, async {
+        self.run("get", || key.to_string(), async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.get(key)).await;
@@ -168,8 +168,10 @@ impl SidecarClient {
 
     /// Fetch multiple values in one round-trip. Missing keys are omitted.
     pub async fn get_multi(&self, keys: &[&str]) -> Result<HashMap<String, Value>> {
-        let key_desc = keys.join(",");
-        self.run("getMulti", &key_desc, async {
+        // The key list is only materialized for the error log on failure;
+        // joining unconditionally would cost one allocation per call on the
+        // hot path.
+        self.run("getMulti", || keys.join(","), async {
             for key in keys {
                 self.validate_key(key)?;
             }
@@ -182,7 +184,7 @@ impl SidecarClient {
 
     /// Fetch a value together with its CAS token.
     pub async fn get_cas(&self, key: &str) -> Result<Option<CasValue>> {
-        self.run("getCas", key, async {
+        self.run("getCas", || key.to_string(), async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.get_cas(key)).await;
@@ -202,7 +204,7 @@ impl SidecarClient {
     ) -> Result<bool> {
         self.run(
             "set",
-            key,
+            || key.to_string(),
             self.store(StoreCommand::Set, key, value, expire),
         )
         .await
@@ -217,7 +219,7 @@ impl SidecarClient {
     ) -> Result<bool> {
         self.run(
             "add",
-            key,
+            || key.to_string(),
             self.store(StoreCommand::Add, key, value, expire),
         )
         .await
@@ -232,7 +234,7 @@ impl SidecarClient {
     ) -> Result<bool> {
         self.run(
             "replace",
-            key,
+            || key.to_string(),
             self.store(StoreCommand::Replace, key, value, expire),
         )
         .await
@@ -242,7 +244,7 @@ impl SidecarClient {
     pub async fn append(&self, key: &str, value: impl ToMemcacheValue) -> Result<bool> {
         self.run(
             "append",
-            key,
+            || key.to_string(),
             self.store(StoreCommand::Append, key, value, Expiration::Never),
         )
         .await
@@ -252,7 +254,7 @@ impl SidecarClient {
     pub async fn prepend(&self, key: &str, value: impl ToMemcacheValue) -> Result<bool> {
         self.run(
             "prepend",
-            key,
+            || key.to_string(),
             self.store(StoreCommand::Prepend, key, value, Expiration::Never),
         )
         .await
@@ -266,7 +268,7 @@ impl SidecarClient {
         expire: impl Into<Expiration>,
     ) -> Result<bool> {
         let expire = expire.into();
-        self.run("cas", key, async move {
+        self.run("cas", || key.to_string(), async move {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self
@@ -279,7 +281,7 @@ impl SidecarClient {
 
     /// Delete a key. Returns `true` if the key existed.
     pub async fn delete(&self, key: &str) -> Result<bool> {
-        self.run("delete", key, async {
+        self.run("delete", || key.to_string(), async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.delete(key)).await;
@@ -290,7 +292,7 @@ impl SidecarClient {
 
     /// Atomically increment a counter. Returns `None` if the key is missing.
     pub async fn incr(&self, key: &str, delta: u64) -> Result<Option<u64>> {
-        self.run("incr", key, async {
+        self.run("incr", || key.to_string(), async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.incr_decr(true, key, delta)).await;
@@ -301,7 +303,7 @@ impl SidecarClient {
 
     /// Atomically decrement a counter. Returns `None` if the key is missing.
     pub async fn decr(&self, key: &str, delta: u64) -> Result<Option<u64>> {
-        self.run("decr", key, async {
+        self.run("decr", || key.to_string(), async {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.incr_decr(false, key, delta)).await;
@@ -313,7 +315,7 @@ impl SidecarClient {
     /// Update a key's expiration without fetching its value.
     pub async fn touch(&self, key: &str, expire: impl Into<Expiration>) -> Result<bool> {
         let expire = expire.into();
-        self.run("touch", key, async move {
+        self.run("touch", || key.to_string(), async move {
             self.validate_key(key)?;
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.touch(key, expire)).await;
@@ -324,7 +326,7 @@ impl SidecarClient {
 
     /// Invalidate all items on the server.
     pub async fn flush_all(&self) -> Result<()> {
-        self.run("flushAll", "", async {
+        self.run("flushAll", String::new, async {
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.flush_all()).await;
             Self::discard_on_error(obj, result)
@@ -334,7 +336,7 @@ impl SidecarClient {
 
     /// Query the server version string.
     pub async fn version(&self) -> Result<String> {
-        self.run("version", "", async {
+        self.run("version", String::new, async {
             let mut obj = self.pool.get().await?;
             let result = self.timed(obj.version()).await;
             Self::discard_on_error(obj, result)
@@ -360,10 +362,15 @@ impl SidecarClient {
     }
 
     /// Run `op`, logging any error at `error` level in the mesh log format.
+    ///
+    /// `key` is a lazy description of the target key(s): it is only invoked
+    /// when the operation failed, so the success path pays nothing for it
+    /// (multi-key callers can pass `|| keys.join(",")` without a per-call
+    /// allocation).
     async fn run<T>(
         &self,
         method: &str,
-        key: &str,
+        key: impl FnOnce() -> String,
         op: impl Future<Output = Result<T>>,
     ) -> Result<T> {
         let result = op.await;
@@ -373,7 +380,7 @@ impl SidecarClient {
                 "mc mesh {} error ,namespace:{} ,key: {}",
                 method,
                 self.config.namespace,
-                key
+                key()
             );
         }
         result

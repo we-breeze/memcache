@@ -75,6 +75,10 @@ pub(crate) struct Connection {
     /// a response can be matched to its request. Starts at 1 so the "no
     /// correlation" value 0 stays distinguishable.
     next_opaque: u32,
+    /// Scratch buffer for assembling request frames, reused across operations
+    /// on this connection so the hot path does not allocate a fresh `Vec`
+    /// per request. Empty whenever the connection is idle.
+    pub(crate) write_buf: Vec<u8>,
 }
 
 impl Connection {
@@ -111,6 +115,7 @@ impl Connection {
             protocol: config.protocol,
             read_buf: BytesMut::with_capacity(4096),
             next_opaque: 1,
+            write_buf: Vec::with_capacity(1024),
         })
     }
 
