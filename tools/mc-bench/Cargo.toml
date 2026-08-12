@@ -1,0 +1,30 @@
+[package]
+name = "mc-bench"
+version = "0.1.0"
+edition = "2024"
+description = "Load-test harness for the memcache SDK against the breeze mesh"
+license = "MIT"
+publish = false
+
+[[bin]]
+name = "mc-bench"
+path = "src/main.rs"
+
+[features]
+default = ["memory-stats", "replay"]
+# Enable brz-mem's heap accounting (per-request allocation tracking). Off
+# removes the bookkeeping overhead from the hot path for pure-throughput runs.
+memory-stats = ["brz-mem/heap-stats"]
+# Enable the --replay mode (drives memcache::replay, the replay/comparison
+# direct-TCP client).
+replay = ["memcache/direct-tcp"]
+
+[dependencies]
+memcache = { path = "../.." }
+brz-mem.workspace = true
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+clap = { version = "4", features = ["derive", "env"] }
+hdrhistogram = "7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

@@ -223,3 +223,20 @@ The test suite includes an in-process fake memcached server that exercises
 the full request/response path for both protocols; no external server is
 required. Integration tests against a real memcached (Docker) are gated
 behind `direct-tcp` and `#[ignore]`.
+
+## Load testing
+
+`tools/mc-bench` is a load-test harness mirroring the redis SDK's
+`redis-bench`: fixed-shape workloads (get / getmulti / set / incr) over
+`--concurrency` async workers, with throughput, p50/p95/p99 latency,
+per-request allocation accounting (via `brz-mem`), reply verification
+(`--verify` detects request/response mixups), and TCP fault injection
+(`--slow-rate`, `--timeout-rate`, `--reset-rate`, `--outage-ms`,
+client-side `--cpu-stall-rate`). It drives all three access modes:
+
+```bash
+cargo run -p mc-bench --release -- --namespace my_ns -c 64 -n 1000000 get
+cargo run -p mc-bench --release -- --direct 127.0.0.1:11211 -c 64 set
+cargo run -p mc-bench --release -- --shards 10.0.0.1:11211,10.0.0.2:11211 get
+cargo run -p mc-bench --release -- --replay 127.0.0.1:11211 -c 64 get
+```

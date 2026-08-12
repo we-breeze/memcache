@@ -159,7 +159,7 @@ pub(crate) fn group_from_name(name: &str) -> Option<&str> {
 /// Matches the registry file whose protocol is `mc` and whose service ends with
 /// `+<group>+all:<namespace>`, ignoring the (deployment-specific) domain prefix.
 /// A unix-socket match is preferred over a TCP match when both are present.
-pub(crate) fn discover(dir: &Path, group: &str, namespace: &str) -> Result<Endpoint> {
+pub fn discover(dir: &Path, group: &str, namespace: &str) -> Result<Endpoint> {
     discover_matching(dir, Some(group), namespace)
 }
 
