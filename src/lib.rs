@@ -76,6 +76,8 @@ pub mod config;
 pub mod direct;
 pub mod error;
 pub mod expiration;
+#[cfg(feature = "service")]
+pub mod service;
 pub mod sidecar;
 pub mod value;
 

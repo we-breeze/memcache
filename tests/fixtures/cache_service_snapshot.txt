@@ -1,0 +1,56 @@
+1786341761361599949
+all
+global:
+  get_sign_time: 10000
+  heart_beat_time: 2000
+
+status.darwinTag:
+  hash: bkdr
+  distribution: ketama
+  hash_tag: status.darwinTag
+  save_tag: false
+  auto_eject_hosts: false
+  timeout: 300
+  redis: false
+  server_retry_timeout: 10000
+  server_failure_limit: 2
+  partial_reply: true
+  exptime: 432000000
+  master:
+   - 192.0.2.10:15010
+   - 192.0.2.11:15010
+   - 192.0.2.12:15010
+  master_l1:
+   -
+     - 192.0.2.15:15010
+     - 192.0.2.14:15010
+   -
+     - 192.0.2.16:15010
+     - 192.0.2.13:15010
+
+attitude.specVector:
+  hash: crc32
+  distribution: modula
+  hash_tag: attitude.specVector
+  save_tag: false
+  auto_eject_hosts: false
+  timeout: 300
+  redis: false
+  server_retry_timeout: 10000
+  server_failure_limit: 2
+  partial_reply: true
+  exptime: 2592000000
+  master:
+   - 192.0.2.18:5005
+   - 192.0.2.17:5005
+  master_l1:
+   -
+     - 192.0.2.19:5005
+     - 192.0.2.20:5005
+  slave:
+   - 192.0.2.21:5005
+   - 192.0.2.22:5005
+  slave_l1:
+   -
+     - 192.0.2.23:5005
+     - 192.0.2.24:5005

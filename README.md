@@ -14,6 +14,11 @@ modes**:
   text-protocol client for replay/comparison topologies, reproducing the
   source service's `SockIOPool.NEW_COMPAT_HASH` (crc32 + modula) node
   selection so a replay proxy can lane-match recorded exchanges.
+- **Cache-service templates** ([`service`], feature `service`) — a Rust port
+  of the Java `commons-memcache` templates: `MemcacheServiceTemplate`
+  (primary cache-service client with backup fallback) and `MemCacheTemplate`
+  (multi-tier master / slave / L1 backup), with Vintage statics-config
+  integration for building and hot-swapping the backup.
 
 Both wire protocols (text and binary) are implemented; binary is the
 default, matching the mesh `PingPongMemcachedBinaryClient`. The public API
@@ -223,6 +228,32 @@ The test suite includes an in-process fake memcached server that exercises
 the full request/response path for both protocols; no external server is
 required. Integration tests against a real memcached (Docker) are gated
 behind `direct-tcp` and `#[ignore]`.
+
+## Cache-service templates (feature `service`)
+
+`memcache::service` ports the Java `commons-memcache` templates:
+
+- `Cacheable` — the async trait analogue of the Java `CacheAble<T>`;
+  implemented by `memcache::Client`, `ShardedCache`, and `MemCacheTemplate`.
+- `MemcacheServiceTemplate` — routes operations to a primary cache-service
+  client with automatic backup fallback, process-wide and per-template
+  switches, and split `get_multi` (300-key shards, 200ms assist window).
+- `MemCacheTemplate` — the multi-tier (master / slave / master-L1 /
+  slave-L1) backup cache: L1→master→slave read cascade with set-back,
+  policy-driven write fan-out (`writeAll` / `writeAndDeleteL1` /
+  `writeAndIfExistL1`), and the Java runtime switches (`read_only`,
+  `update_master_l1`, `update_slave_l1`, `force_write_all`, ...).
+- `service::vintage` — builds the backup from a Vintage statics-config
+  group (`backup_from_vintage`) and hot-swaps it on config sign changes
+  (`spawn_config_watcher`).
+
+```bash
+cargo test --features service
+# YAML/snapshot config tests against a live Vintage snapshot:
+BRZ_MCS_SNAPSHOT=/tmp/breeze/snapshot/<snapshot-file> cargo test --features service --test yaml_config
+# Docker-based end-to-end tests (memcached image, BRZ_MC_IMAGE to override):
+cargo test --features service --test yaml_integration -- --ignored
+```
 
 ## Load testing
 
