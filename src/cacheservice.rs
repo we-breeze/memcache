@@ -64,6 +64,10 @@ pub struct CacheNamespaceConf {
     distribution: Option<String>,
     #[serde(default)]
     master: Vec<String>,
+    #[serde(default)]
+    slave: Vec<String>,
+    #[serde(default, rename = "master_l1")]
+    master_l1: Vec<Vec<String>>,
     #[serde(default, rename = "slave_l1")]
     slave_l1: Vec<Vec<String>>,
 }
@@ -82,6 +86,17 @@ impl CacheNamespaceConf {
     /// Master endpoints in configured order (`host:port`).
     pub fn masters(&self) -> &[String] {
         &self.master
+    }
+
+    /// Slave endpoints in configured order (`host:port`); empty when the
+    /// namespace has no slave pool.
+    pub fn slaves(&self) -> &[String] {
+        &self.slave
+    }
+
+    /// L1 master endpoint groups; each inner list is one group of `host:port`.
+    pub fn master_l1(&self) -> &[Vec<String>] {
+        &self.master_l1
     }
 
     /// L1 slave endpoint groups; each inner list is one group of `host:port`.
