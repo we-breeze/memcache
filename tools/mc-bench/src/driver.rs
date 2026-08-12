@@ -26,6 +26,47 @@ pub enum BenchClient {
     Shards(Arc<Shards>),
     /// Master/slave HA topology client.
     Ha(Arc<HaClient>),
+    /// The multi-tier backup template (`memcache::service`), behind a thin
+    /// adapter so the harness can drive it without the `service` feature
+    /// being enabled in every build.
+    Template(Arc<dyn TemplateClient>),
+}
+
+/// The subset of `MemCacheTemplate` the harness drives (get/set only; the
+/// template surface has no `incr`). Implemented for the template when the
+/// `template` feature is on.
+#[cfg_attr(not(feature = "template"), allow(dead_code))]
+#[async_trait::async_trait]
+pub trait TemplateClient: Send + Sync {
+    async fn get(&self, key: &str) -> memcache::Result<Option<Value>>;
+    async fn get_multi(
+        &self,
+        keys: &[&str],
+    ) -> memcache::Result<std::collections::HashMap<String, Value>>;
+    async fn set(&self, key: &str, value: Vec<u8>) -> memcache::Result<bool>;
+}
+
+#[cfg(feature = "template")]
+#[async_trait::async_trait]
+impl TemplateClient for memcache::service::MemCacheTemplate {
+    async fn get(&self, key: &str) -> memcache::Result<Option<Value>> {
+        memcache::service::Cacheable::get(self, key).await
+    }
+    async fn get_multi(
+        &self,
+        keys: &[&str],
+    ) -> memcache::Result<std::collections::HashMap<String, Value>> {
+        memcache::service::Cacheable::get_multi(self, keys).await
+    }
+    async fn set(&self, key: &str, value: Vec<u8>) -> memcache::Result<bool> {
+        memcache::service::Cacheable::set(
+            self,
+            key,
+            memcache::Value::new(value, 0),
+            memcache::Expiration::Never,
+        )
+        .await
+    }
 }
 
 impl BenchClient {
@@ -34,6 +75,7 @@ impl BenchClient {
             BenchClient::Unified(client) => client.get(key).await,
             BenchClient::Shards(shards) => shards.get_client(key).get(key).await,
             BenchClient::Ha(client) => client.get(key).await,
+            BenchClient::Template(client) => client.get(key).await,
         }
     }
 
@@ -44,6 +86,7 @@ impl BenchClient {
         match self {
             BenchClient::Unified(client) => client.get_multi(keys).await,
             BenchClient::Ha(client) => client.get_multi(keys).await,
+            BenchClient::Template(client) => client.get_multi(keys).await,
             BenchClient::Shards(_) => {
                 // Route each key to its owning shard and merge. Sequential
                 // per-shard fan-out keeps the harness simple; GET coverage is
@@ -64,6 +107,7 @@ impl BenchClient {
             BenchClient::Unified(client) => client.set(key, value, 0u32).await,
             BenchClient::Shards(shards) => shards.get_client(key).set(key, value, 0u32).await,
             BenchClient::Ha(client) => client.set(key, value, 0u32).await,
+            BenchClient::Template(client) => client.set(key, value.to_vec()).await,
         }
     }
 
@@ -72,6 +116,10 @@ impl BenchClient {
             BenchClient::Unified(client) => client.incr(key, delta).await,
             BenchClient::Shards(shards) => shards.get_client(key).incr(key, delta).await,
             BenchClient::Ha(client) => client.incr(key, delta).await,
+            // The template surface has no incr/decr.
+            BenchClient::Template(_) => Err(memcache::Error::Client(
+                "template mode does not support incr".into(),
+            )),
         }
     }
 }

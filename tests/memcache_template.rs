@@ -62,6 +62,18 @@ impl MockPool {
     }
 }
 
+/// Poll `cond` until it holds (setbacks run in spawned tasks, off the read
+/// path, so they land asynchronously).
+async fn wait_for(mut cond: impl FnMut() -> bool) {
+    for _ in 0..200 {
+        if cond() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    panic!("condition not met within the polling window");
+}
+
 #[async_trait]
 impl Cacheable for MockPool {
     async fn get(&self, key: &str) -> Result<Option<Value>> {
@@ -179,19 +191,20 @@ async fn get_cascades_l1_master_slave_with_setbacks() {
     assert_eq!(got.as_string().unwrap(), "from-l1");
     assert_eq!(master.count(|c| &c.get), 0);
 
-    // Master hit sets back into the consulted L1.
+    // Master hit sets back into the consulted L1 (setbacks are best-effort
+    // and run off the read path; poll briefly for them to land).
     master.seed("m", "from-master");
     let got = Cacheable::get(&t, "m").await.unwrap().unwrap();
     assert_eq!(got.as_string().unwrap(), "from-master");
-    assert!(l1.has("m", "from-master"));
+    wait_for(|| l1.has("m", "from-master")).await;
     assert_eq!(slave.count(|c| &c.get), 0);
 
     // Slave hit sets back into both master and L1.
     slave.seed("s", "from-slave");
     let got = Cacheable::get(&t, "s").await.unwrap().unwrap();
     assert_eq!(got.as_string().unwrap(), "from-slave");
-    assert!(master.has("s", "from-slave"));
-    assert!(l1.has("s", "from-slave"));
+    wait_for(|| master.has("s", "from-slave")).await;
+    wait_for(|| l1.has("s", "from-slave")).await;
 
     // Total miss.
     assert!(Cacheable::get(&t, "nope").await.unwrap().is_none());
@@ -233,10 +246,10 @@ async fn get_multi_cascades_and_sets_back() {
     assert_eq!(values["c"].as_string().unwrap(), "sc");
 
     // master/slave hits are set back into the consulted L1; the slave hit is
-    // also set back into master.
-    assert!(l1.has("b", "mb"));
-    assert!(l1.has("c", "sc"));
-    assert!(master.has("c", "sc"));
+    // also set back into master (setbacks run off the read path; poll).
+    wait_for(|| l1.has("b", "mb")).await;
+    wait_for(|| l1.has("c", "sc")).await;
+    wait_for(|| master.has("c", "sc")).await;
 }
 
 #[tokio::test]

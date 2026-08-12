@@ -222,6 +222,39 @@ async fn primary_failure_falls_back_to_backup() {
 }
 
 #[tokio::test]
+async fn primary_circuit_opens_after_consecutive_failures() {
+    let _guard = SWITCH_LOCK.lock().unwrap();
+    set_global_switch(true);
+
+    let primary = MockCache::new();
+    let backup = MockCache::new();
+    let template = MemcacheServiceTemplate::builder()
+        .primary(primary.clone())
+        .backup(backup.clone())
+        .use_primary(true)
+        .build();
+
+    primary.set_fail(true);
+    backup.put("k", "v");
+
+    // The first few failures still try the primary each time; after the
+    // threshold the circuit opens and requests go straight to the backup.
+    for _ in 0..5 {
+        template.get("k").await.unwrap();
+    }
+    let calls_at_open = primary.calls();
+    for _ in 0..10 {
+        template.get("k").await.unwrap();
+    }
+    assert_eq!(
+        primary.calls(),
+        calls_at_open,
+        "open circuit must short-circuit the primary"
+    );
+    assert!(backup.calls() >= 15, "backup serves all fallback traffic");
+}
+
+#[tokio::test]
 async fn global_switch_off_forces_backup() {
     let _guard = SWITCH_LOCK.lock().unwrap();
 

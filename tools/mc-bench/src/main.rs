@@ -102,6 +102,12 @@ struct Args {
     #[arg(long)]
     write_slave: bool,
 
+    /// With --service-yaml: drive the multi-tier `MemCacheTemplate`
+    /// (memcache::service, the Java MemCacheTemplate port) instead of the
+    /// HaClient. Requires the `template` feature.
+    #[arg(long)]
+    template: bool,
+
     /// Hash algorithm for --shards (breeze mesh names, e.g. crc32).
     #[arg(long, default_value = "crc32")]
     hash: String,
@@ -490,6 +496,9 @@ fn build_client(args: &Args) -> Result<BenchClient, String> {
             .map_err(|e| format!("read --service-yaml {yaml_path}: {e}"))?;
         let config = memcache::cacheservice::CacheServiceConfig::from_yaml_str(&yaml)
             .map_err(|e| format!("parse --service-yaml {yaml_path}: {e}"))?;
+        if args.template {
+            return build_template(&config, &args.ns);
+        }
         let ns = config
             .namespace(&args.ns)
             .ok_or_else(|| format!("namespace '{}' not in {yaml_path}", args.ns))?;
@@ -559,6 +568,35 @@ fn server_config(args: &Args, addr: &str) -> Result<ServerConfig, String> {
         .with_min_connections(args.min_conns)
         .with_max_connections(args.max_conns)
         .with_op_timeout(Duration::from_millis(args.op_timeout_ms)))
+}
+
+/// Build a `MemCacheTemplate` from the parsed YAML (feature `template`).
+#[cfg(feature = "template")]
+fn build_template(
+    config: &memcache::cacheservice::CacheServiceConfig,
+    ns: &str,
+) -> Result<BenchClient, String> {
+    let ns = config
+        .namespace(ns)
+        .ok_or_else(|| format!("namespace '{ns}' not in the YAML"))?;
+    let template = memcache::service::MemCacheTemplate::from_namespace_conf(
+        ns,
+        memcache::service::PoolOptions::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(BenchClient::Template(Arc::new(template)))
+}
+
+/// Stub when the `template` feature is off.
+#[cfg(not(feature = "template"))]
+fn build_template(
+    _config: &memcache::cacheservice::CacheServiceConfig,
+    _ns: &str,
+) -> Result<BenchClient, String> {
+    Err(
+        "--template requires the `template` feature (cargo run -p mc-bench --features template)"
+            .into(),
+    )
 }
 
 /// Issue throwaway operations to prime the pool; not measured.

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::value::{CasValue, ToMemcacheValue, Value};
@@ -65,6 +65,10 @@ pub struct MemcacheServiceTemplate {
     backup: Option<Arc<ArcSwapAny<Arc<BackupSlot>>>>,
     /// Per-template switch (the Java per-bean `motanMcSwitcher`).
     use_primary: Arc<AtomicBool>,
+    /// Consecutive primary failures (reset on success), feeding the circuit.
+    primary_failures: Arc<AtomicU64>,
+    /// Epoch millis until which the primary is short-circuited (0 = closed).
+    primary_open_until: Arc<AtomicU64>,
     expire: Expiration,
 }
 
@@ -107,11 +111,8 @@ impl MemcacheServiceTemplate {
 
     /// Fetch a single value.
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
-        self.dispatch(|c| {
-            let key = key.to_string();
-            Box::pin(async move { c.get(&key).await })
-        })
-        .await
+        self.dispatch(|c| Box::pin(async move { c.get(key).await }))
+            .await
     }
 
     /// Fetch multiple values.
@@ -176,14 +177,11 @@ impl MemcacheServiceTemplate {
     }
 
     async fn do_get_multi(&self, keys: &[&str]) -> Result<HashMap<String, Value>> {
-        let owned: Vec<String> = keys.iter().map(|s| s.to_string()).collect();
         self.dispatch(move |c| {
-            let owned = owned.clone();
             Box::pin(async move {
-                let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
                 // Misses are simply absent from the map, like the Java
                 // doGetMulti cleanup that removes null entries.
-                c.get_multi(&refs).await
+                c.get_multi(keys).await
             })
         })
         .await
@@ -203,11 +201,9 @@ impl MemcacheServiceTemplate {
     ) -> Result<bool> {
         let value = value.to_memcache_value();
         let expire = expire.into();
-        self.dispatch(|c| {
-            let (key, value) = (key.to_string(), value.clone());
-            Box::pin(async move { c.set(&key, value, expire).await })
-        })
-        .await
+        let value = &value;
+        self.dispatch(|c| Box::pin(async move { c.set(key, value.clone(), expire).await }))
+            .await
     }
 
     /// Store a value, discarding the reply (Java `setWithNoreply`).
@@ -224,9 +220,9 @@ impl MemcacheServiceTemplate {
     ) -> Result<()> {
         let value = value.to_memcache_value();
         let expire = expire.into();
+        let value = &value;
         self.dispatch(|c| {
-            let (key, value) = (key.to_string(), value.clone());
-            Box::pin(async move { c.set_with_noreply(&key, value, expire).await })
+            Box::pin(async move { c.set_with_noreply(key, value.clone(), expire).await })
         })
         .await
     }
@@ -245,20 +241,15 @@ impl MemcacheServiceTemplate {
     ) -> Result<bool> {
         let value = value.to_memcache_value();
         let expire = expire.into();
-        self.dispatch(|c| {
-            let (key, value) = (key.to_string(), value.clone());
-            Box::pin(async move { c.add(&key, value, expire).await })
-        })
-        .await
+        let value = &value;
+        self.dispatch(|c| Box::pin(async move { c.add(key, value.clone(), expire).await }))
+            .await
     }
 
     /// Fetch a value together with its CAS token.
     pub async fn get_cas(&self, key: &str) -> Result<Option<CasValue>> {
-        self.dispatch(|c| {
-            let key = key.to_string();
-            Box::pin(async move { c.get_cas(&key).await })
-        })
-        .await
+        self.dispatch(|c| Box::pin(async move { c.get_cas(key).await }))
+            .await
     }
 
     /// Compare-and-swap with the template's default expiration.
@@ -273,48 +264,53 @@ impl MemcacheServiceTemplate {
         value: &CasValue,
         expire: impl Into<Expiration>,
     ) -> Result<bool> {
-        let value = value.clone();
         let expire = expire.into();
-        self.dispatch(|c| {
-            let (key, value) = (key.to_string(), value.clone());
-            Box::pin(async move { c.cas(&key, &value, expire).await })
-        })
-        .await
+        self.dispatch(|c| Box::pin(async move { c.cas(key, value, expire).await }))
+            .await
     }
 
     /// Delete a key.
     pub async fn delete(&self, key: &str) -> Result<bool> {
-        self.dispatch(|c| {
-            let key = key.to_string();
-            Box::pin(async move { c.delete(&key).await })
-        })
-        .await
+        self.dispatch(|c| Box::pin(async move { c.delete(key).await }))
+            .await
     }
 
     /// Delete a key, discarding the reply (Java `deleteWithNoreply`).
     pub async fn delete_with_noreply(&self, key: &str) -> Result<()> {
-        self.dispatch(|c| {
-            let key = key.to_string();
-            Box::pin(async move { c.delete_with_noreply(&key).await })
-        })
-        .await
+        self.dispatch(|c| Box::pin(async move { c.delete_with_noreply(key).await }))
+            .await
     }
 
     /// The routing core: primary when its switches are on, falling back to
     /// the backup on error; otherwise straight to the backup.
-    async fn dispatch<T, F>(&self, op: F) -> Result<T>
+    ///
+    /// After [`CIRCUIT_FAILURES`] consecutive primary failures the primary
+    /// is short-circuited for [`CIRCUIT_COOLDOWN`]: requests go straight to
+    /// the backup without paying a failing primary attempt each. One probe
+    /// request is let through after the cooldown; a success closes the
+    /// circuit again.
+    #[allow(clippy::needless_lifetimes)]
+    async fn dispatch<'a, T, F>(&'a self, op: F) -> Result<T>
     where
         F: Fn(
             Arc<dyn Cacheable>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>,
     {
         if self.use_primary.load(Ordering::Relaxed)
             && global_switch()
             && let Some(primary) = &self.primary
         {
+            if self.primary_circuit_open() {
+                return self.dispatch_backup(op).await;
+            }
             match op(primary.clone()).await {
-                Ok(value) => return Ok(value),
+                Ok(value) => {
+                    self.primary_failures.store(0, Ordering::Relaxed);
+                    return Ok(value);
+                }
                 Err(e) => {
+                    self.note_primary_failure();
                     if let Some(backup) = self.backup() {
                         warn!(error = %e, "primary cache failed; falling back to backup");
                         return op(backup).await;
@@ -324,6 +320,17 @@ impl MemcacheServiceTemplate {
             }
         }
 
+        self.dispatch_backup(op).await
+    }
+
+    #[allow(clippy::needless_lifetimes)]
+    async fn dispatch_backup<'a, T, F>(&'a self, op: F) -> Result<T>
+    where
+        F: Fn(
+            Arc<dyn Cacheable>,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + 'a>>,
+    {
         match self.backup() {
             Some(backup) => op(backup).await,
             None => Err(Error::Protocol(
@@ -331,6 +338,45 @@ impl MemcacheServiceTemplate {
             )),
         }
     }
+
+    /// Whether the primary circuit is open (short-circuited until the
+    /// cooldown instant stored as epoch millis, 0 = closed).
+    fn primary_circuit_open(&self) -> bool {
+        let until = self.primary_open_until.load(Ordering::Relaxed);
+        if until == 0 {
+            return false;
+        }
+        let now = epoch_millis();
+        if now < until {
+            return true;
+        }
+        // Cooldown elapsed: half-open — exactly one caller wins the reset
+        // and probes the primary; others keep short-circuiting.
+        self.primary_open_until
+            .compare_exchange(until, 0, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+    }
+
+    fn note_primary_failure(&self) {
+        let failures = self.primary_failures.fetch_add(1, Ordering::Relaxed) + 1;
+        if failures >= CIRCUIT_FAILURES {
+            self.primary_open_until
+                .store(epoch_millis() + CIRCUIT_COOLDOWN_MS, Ordering::Relaxed);
+            self.primary_failures.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Consecutive primary failures before the circuit opens.
+const CIRCUIT_FAILURES: u64 = 5;
+/// How long an open circuit short-circuits the primary, in milliseconds.
+const CIRCUIT_COOLDOWN_MS: u64 = 5_000;
+
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
 }
 
 fn clamp_expire(minutes: u64) -> Expiration {
@@ -392,6 +438,8 @@ impl MemcacheServiceTemplateBuilder {
                 .backup
                 .map(|b| Arc::new(ArcSwapAny::new(Arc::new(BackupSlot(b))))),
             use_primary: Arc::new(AtomicBool::new(self.use_primary)),
+            primary_failures: Arc::new(AtomicU64::new(0)),
+            primary_open_until: Arc::new(AtomicU64::new(0)),
             expire: self.expire_minutes.map_or(Expiration::Never, clamp_expire),
         }
     }

@@ -93,12 +93,21 @@ impl Cacheable for ShardedCache {
     }
 
     async fn get_multi(&self, keys: &[&str]) -> Result<HashMap<String, Value>> {
-        // Group keys by shard so each backend gets one get_multi round-trip.
+        // Group keys by shard so each backend gets one get_multi round-trip;
+        // the per-shard requests run concurrently (sequential awaits would
+        // make the call N shards x RTT).
         let (shard_clients, buckets) = self.group_by_shard(keys);
 
+        let results = futures_util::future::join_all(
+            shard_clients
+                .iter()
+                .zip(&buckets)
+                .map(|(client, bucket)| client.get_multi(bucket)),
+        )
+        .await;
         let mut result = HashMap::with_capacity(keys.len());
-        for (client, bucket) in shard_clients.into_iter().zip(buckets) {
-            result.extend(client.get_multi(&bucket).await?);
+        for partial in results {
+            result.extend(partial?);
         }
         Ok(result)
     }

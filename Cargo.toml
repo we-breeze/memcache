@@ -20,6 +20,7 @@ md5 = "0.7"
 rand = "0.8"
 async-trait = { version = "0.1", optional = true }
 vintage = { path = "../vintage", optional = true }
+futures-util = "0.3.34"
 
 [features]
 direct-tcp = ["memchr"]

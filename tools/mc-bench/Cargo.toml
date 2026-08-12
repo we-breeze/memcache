@@ -18,6 +18,9 @@ memory-stats = ["brz-mem/heap-stats"]
 # Enable the --replay mode (drives memcache::replay, the replay/comparison
 # direct-TCP client).
 replay = ["memcache/direct-tcp"]
+# Enable the --template mode (drives memcache::service::MemCacheTemplate,
+# the multi-tier master/slave/L1 backup template).
+template = ["memcache/service"]
 
 [dependencies]
 memcache = { path = "../.." }
@@ -28,3 +31,4 @@ clap = { version = "4", features = ["derive", "env"] }
 hdrhistogram = "7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+async-trait = "0.1.92"

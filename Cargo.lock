@@ -744,6 +744,7 @@ dependencies = [
 name = "mc-bench"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "brz-mem",
  "bytes",
  "clap",
@@ -768,6 +769,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "deadpool",
+ "futures-util",
  "md5",
  "memchr",
  "rand 0.8.7",

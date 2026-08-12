@@ -251,83 +251,109 @@ impl MemCacheTemplate {
         expire: Expiration,
         async_write: bool,
     ) {
-        for pool in pools {
-            let (pool, key, value) = (pool.clone(), key.to_string(), value.clone());
-            let policy = self.write_policy;
-            let work = async move {
-                let result = match policy {
-                    WritePolicy::WriteAll => pool.set(&key, value, expire).await.map(|_| ()),
-                    WritePolicy::WriteAndDeleteL1 => pool.delete(&key).await.map(|_| ()),
-                    WritePolicy::WriteAndIfExistL1 => match pool.get(&key).await {
-                        Ok(Some(_)) => pool.set(&key, value, expire).await.map(|_| ()),
-                        Ok(None) => Ok(()),
-                        Err(e) => Err(e),
-                    },
-                };
-                if let Err(error) = result {
-                    warn!(%error, "L1 pool write failed");
-                }
-            };
-            if async_write {
-                tokio::spawn(work);
-            } else {
-                work.await;
+        if async_write {
+            for pool in pools {
+                let (pool, key, value) = (pool.clone(), key.to_string(), value.clone());
+                let policy = self.write_policy;
+                tokio::spawn(async move {
+                    if let Err(error) = apply_write_policy(&pool, policy, &key, value, expire).await
+                    {
+                        warn!(%error, "L1 pool write failed");
+                    }
+                });
             }
+            return;
         }
+        // Synchronous path: the pool writes are independent, so run them
+        // concurrently instead of paying one RTT per pool.
+        futures_util::future::join_all(pools.iter().map(|pool| async move {
+            if let Err(error) =
+                apply_write_policy(pool, self.write_policy, key, value.clone(), expire).await
+            {
+                warn!(%error, "L1 pool write failed");
+            }
+        }))
+        .await;
     }
 
     async fn delete_l1_pools(&self, pools: &[Pool], key: &str, async_write: bool) {
-        for pool in pools {
-            let (pool, key) = (pool.clone(), key.to_string());
-            let work = async move {
-                if let Err(error) = pool.delete(&key).await {
-                    warn!(%error, "L1 pool delete failed");
-                }
-            };
-            if async_write {
-                tokio::spawn(work);
-            } else {
-                work.await;
+        if async_write {
+            for pool in pools {
+                let (pool, key) = (pool.clone(), key.to_string());
+                tokio::spawn(async move {
+                    if let Err(error) = pool.delete(&key).await {
+                        warn!(%error, "L1 pool delete failed");
+                    }
+                });
             }
+            return;
         }
+        futures_util::future::join_all(pools.iter().map(|pool| async move {
+            if let Err(error) = pool.delete(key).await {
+                warn!(%error, "L1 pool delete failed");
+            }
+        }))
+        .await;
     }
 
     /// Fans a write out to slave + L1 tiers after the master succeeded
-    /// (shared tail of the Java `set` / `add` / `cas`).
+    /// (shared tail of the Java `set` / `add` / `cas`). The tiers are
+    /// independent, so the fan-out runs concurrently — sequential awaits
+    /// would stack one RTT per tier onto the write latency.
     async fn fan_out_write(&self, key: &str, value: &Value, expire: Expiration) {
-        if let Some(slave) = &self.slave
-            && let Err(error) = slave.set(key, value.clone(), expire).await
-        {
-            warn!(%error, "slave pool write failed");
+        let mut pending: Vec<std::pin::Pin<Box<dyn Future<Output = ()> + Send + '_>>> = Vec::new();
+        if let Some(slave) = &self.slave {
+            pending.push(Box::pin(async move {
+                if let Err(error) = slave.set(key, value.clone(), expire).await {
+                    warn!(%error, "slave pool write failed");
+                }
+            }));
         }
         if self.update_master_l1.load(Ordering::Relaxed) {
-            self.write_l1_pools(
-                &self.master_l1.clone(),
+            pending.push(Box::pin(self.write_l1_pools(
+                &self.master_l1,
                 key,
                 value,
                 expire,
                 self.async_write_l1,
-            )
-            .await;
+            )));
         }
         if self.update_slave_l1.load(Ordering::Relaxed) {
-            self.write_l1_pools(
-                &self.slave_l1.clone(),
+            pending.push(Box::pin(self.write_l1_pools(
+                &self.slave_l1,
                 key,
                 value,
                 expire,
                 self.async_write_l1,
-            )
-            .await;
+            )));
         }
-        self.write_l1_pools(
-            &self.extend_slave_l1.clone(),
+        pending.push(Box::pin(self.write_l1_pools(
+            &self.extend_slave_l1,
             key,
             value,
             expire,
             self.async_write_ext_l1,
-        )
-        .await;
+        )));
+        futures_util::future::join_all(pending).await;
+    }
+}
+
+/// One L1 write under the configured [`WritePolicy`].
+async fn apply_write_policy(
+    pool: &Pool,
+    policy: WritePolicy,
+    key: &str,
+    value: Value,
+    expire: Expiration,
+) -> Result<()> {
+    match policy {
+        WritePolicy::WriteAll => pool.set(key, value, expire).await.map(|_| ()),
+        WritePolicy::WriteAndDeleteL1 => pool.delete(key).await.map(|_| ()),
+        WritePolicy::WriteAndIfExistL1 => match pool.get(key).await {
+            Ok(Some(_)) => pool.set(key, value, expire).await.map(|_| ()),
+            Ok(None) => Ok(()),
+            Err(e) => Err(e),
+        },
     }
 }
 
@@ -335,38 +361,88 @@ impl MemCacheTemplate {
 impl Cacheable for MemCacheTemplate {
     async fn get(&self, key: &str) -> Result<Option<Value>> {
         let one_l1 = self.choose_one_l1().cloned();
-        if let Some(l1) = &one_l1
-            && let Some(value) = l1.get(key).await?
-        {
-            // L1 hit returns directly, like the Java fixed path.
-            return Ok(Some(value));
+        if let Some(l1) = &one_l1 {
+            match l1.get(key).await {
+                // L1 hit returns directly, like the Java fixed path.
+                Ok(Some(value)) => return Ok(Some(value)),
+                Ok(None) => {}
+                // A failed tier degrades the read to the next tier instead
+                // of failing the whole operation.
+                Err(error) => warn!(%error, key, "L1 read failed; falling back"),
+            }
         }
 
-        let mut value = match &self.master {
-            Some(master) => master.get(key).await?,
-            None => None,
-        };
-
-        if value.is_none()
-            && let Some(slave) = &self.slave
-        {
-            value = slave.get(key).await?;
-            if value.is_some()
-                && self.setback_master
-                && let Some(master) = &self.master
-            {
-                let v = value.clone().expect("checked some");
-                if let Err(error) = master.set(key, v, self.expire).await {
-                    warn!(%error, "setback to master failed");
+        let mut last_error = None;
+        let mut master_answered = false;
+        let mut slave_answered = false;
+        let mut value = None;
+        if let Some(master) = &self.master {
+            match master.get(key).await {
+                Ok(found) => {
+                    master_answered = true;
+                    value = found;
+                }
+                Err(error) => {
+                    warn!(%error, key, "master read failed; falling back to slave");
+                    last_error = Some(error);
                 }
             }
         }
 
-        // Set back into the consulted L1 with the L1 expire.
-        if let (Some(v), Some(l1)) = (&value, &one_l1)
-            && let Err(error) = l1.set(key, v.clone(), self.expire_l1()).await
+        if value.is_none()
+            && let Some(slave) = &self.slave
         {
-            warn!(%error, "setback to L1 failed");
+            match slave.get(key).await {
+                Ok(found) => {
+                    slave_answered = true;
+                    value = found;
+                    if value.is_some()
+                        && self.setback_master
+                        && let Some(master) = &self.master
+                    {
+                        // Setback is best-effort and off the read path.
+                        let master = master.clone();
+                        let key = key.to_string();
+                        let v = value.clone().expect("checked some");
+                        let expire = self.expire;
+                        tokio::spawn(async move {
+                            if let Err(error) = master.set(&key, v, expire).await {
+                                warn!(%error, "setback to master failed");
+                            }
+                        });
+                    }
+                }
+                Err(error) => {
+                    warn!(%error, key, "slave read failed");
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        // Distinguish a confirmed miss from a tier failure: only report
+        // `None` when some authoritative tier actually answered; if the
+        // tiers that were consulted all failed, surface the error instead
+        // of a phantom miss.
+        if value.is_none() {
+            let confirmed_miss = (master_answered && (self.slave.is_none() || slave_answered))
+                || (self.master.is_none() && slave_answered);
+            if !confirmed_miss && let Some(error) = last_error {
+                return Err(error);
+            }
+        }
+
+        // Set back into the consulted L1 with the L1 expire, off the read
+        // path (best-effort; failures were already only logged).
+        if let (Some(v), Some(l1)) = (&value, &one_l1) {
+            let l1 = l1.clone();
+            let key = key.to_string();
+            let v = v.clone();
+            let expire = self.expire_l1();
+            tokio::spawn(async move {
+                if let Err(error) = l1.set(&key, v, expire).await {
+                    warn!(%error, "setback to L1 failed");
+                }
+            });
         }
 
         Ok(value)
@@ -376,7 +452,14 @@ impl Cacheable for MemCacheTemplate {
         let one_l1 = self.choose_one_l1().cloned();
 
         let mut values: HashMap<String, Value> = match &one_l1 {
-            Some(l1) => l1.get_multi(keys).await?,
+            // A failed L1 tier degrades to the lower tiers, not an error.
+            Some(l1) => match l1.get_multi(keys).await {
+                Ok(found) => found,
+                Err(error) => {
+                    warn!(%error, "L1 multi-read failed; falling back");
+                    HashMap::new()
+                }
+            },
             None => HashMap::new(),
         };
 
@@ -394,9 +477,15 @@ impl Cacheable for MemCacheTemplate {
             let left = left_keys(&values);
             if !left.is_empty() {
                 let refs: Vec<&str> = left.iter().map(String::as_str).collect();
-                let fetched = master.get_multi(&refs).await?;
-                l1_hit_keys = fetched.keys().cloned().collect();
-                values.extend(fetched);
+                match master.get_multi(&refs).await {
+                    Ok(fetched) => {
+                        l1_hit_keys = fetched.keys().cloned().collect();
+                        values.extend(fetched);
+                    }
+                    Err(error) => {
+                        warn!(%error, "master multi-read failed; falling back to slave")
+                    }
+                }
             }
         }
 
@@ -406,30 +495,61 @@ impl Cacheable for MemCacheTemplate {
             let left = left_keys(&values);
             if !left.is_empty() {
                 let refs: Vec<&str> = left.iter().map(String::as_str).collect();
-                let fetched = slave.get_multi(&refs).await?;
-                if self.setback_master
-                    && let Some(master) = &self.master
-                {
-                    for (k, v) in &fetched {
-                        if let Err(error) = master.set(k, v.clone(), self.expire).await {
-                            warn!(%error, "setback to master failed");
+                match slave.get_multi(&refs).await {
+                    Ok(fetched) => {
+                        if self.setback_master
+                            && let Some(master) = &self.master
+                        {
+                            // Setback is best-effort and off the read path:
+                            // one spawned task writes back all fetched keys.
+                            let master = master.clone();
+                            let expire = self.expire;
+                            let pairs: Vec<(String, Value)> = fetched
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                            tokio::spawn(async move {
+                                futures_util::future::join_all(pairs.iter().map(|(k, v)| {
+                                    let master = master.clone();
+                                    async move {
+                                        if let Err(error) = master.set(k, v.clone(), expire).await {
+                                            warn!(%error, "setback to master failed");
+                                        }
+                                    }
+                                }))
+                                .await;
+                            });
                         }
+                        l1_hit_keys.extend(fetched.keys().cloned());
+                        values.extend(fetched);
                     }
+                    Err(error) => warn!(%error, "slave multi-read failed"),
                 }
-                l1_hit_keys.extend(fetched.keys().cloned());
-                values.extend(fetched);
             }
         }
 
-        // Set back everything the L1 missed into the consulted L1.
-        if let Some(l1) = &one_l1 {
-            for k in l1_hit_keys {
-                if let Some(v) = values.get(&k)
-                    && let Err(error) = l1.set(&k, v.clone(), self.expire_l1()).await
-                {
-                    warn!(%error, "setback to L1 failed");
-                }
-            }
+        // Set back everything the L1 missed into the consulted L1, off the
+        // read path.
+        if let Some(l1) = &one_l1
+            && !l1_hit_keys.is_empty()
+        {
+            let l1 = l1.clone();
+            let expire = self.expire_l1();
+            let pairs: Vec<(String, Value)> = l1_hit_keys
+                .into_iter()
+                .filter_map(|k| values.get(&k).map(|v| (k, v.clone())))
+                .collect();
+            tokio::spawn(async move {
+                futures_util::future::join_all(pairs.iter().map(|(k, v)| {
+                    let l1 = l1.clone();
+                    async move {
+                        if let Err(error) = l1.set(k, v.clone(), expire).await {
+                            warn!(%error, "setback to L1 failed");
+                        }
+                    }
+                }))
+                .await;
+            });
         }
 
         Ok(values)
@@ -460,17 +580,20 @@ impl Cacheable for MemCacheTemplate {
             .set_with_noreply(key, value.clone(), expire)
             .await?;
         if let Some(slave) = &self.slave {
-            slave.set_with_noreply(key, value.clone(), expire).await?;
+            // Same policy as `set`: a slave failure is logged, not fatal.
+            if let Err(error) = slave.set_with_noreply(key, value.clone(), expire).await {
+                warn!(%error, "slave pool write failed");
+            }
         }
         if self.update_master_l1.load(Ordering::Relaxed) {
-            self.write_l1_pools(&self.master_l1.clone(), key, &value, expire, false)
+            self.write_l1_pools(&self.master_l1, key, &value, expire, false)
                 .await;
         }
         if self.update_slave_l1.load(Ordering::Relaxed) {
-            self.write_l1_pools(&self.slave_l1.clone(), key, &value, expire, false)
+            self.write_l1_pools(&self.slave_l1, key, &value, expire, false)
                 .await;
         }
-        self.write_l1_pools(&self.extend_slave_l1.clone(), key, &value, expire, false)
+        self.write_l1_pools(&self.extend_slave_l1, key, &value, expire, false)
             .await;
         Ok(())
     }
@@ -517,13 +640,13 @@ impl Cacheable for MemCacheTemplate {
         {
             warn!(%error, "slave pool delete failed");
         }
-        self.delete_l1_pools(&self.master_l1.clone(), key, self.async_write_l1)
+        self.delete_l1_pools(&self.master_l1, key, self.async_write_l1)
             .await;
         if self.update_slave_l1.load(Ordering::Relaxed) {
-            self.delete_l1_pools(&self.slave_l1.clone(), key, self.async_write_l1)
+            self.delete_l1_pools(&self.slave_l1, key, self.async_write_l1)
                 .await;
         }
-        self.delete_l1_pools(&self.extend_slave_l1.clone(), key, self.async_write_ext_l1)
+        self.delete_l1_pools(&self.extend_slave_l1, key, self.async_write_ext_l1)
             .await;
         Ok(rs)
     }
