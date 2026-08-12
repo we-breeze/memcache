@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use memcache::direct::HaClient;
 use memcache::direct::Shards;
 use memcache::{Client, Value};
 
@@ -23,6 +24,8 @@ pub enum BenchClient {
     Unified(Client),
     /// Client-side shard router across several direct backends.
     Shards(Arc<Shards>),
+    /// Master/slave HA topology client.
+    Ha(Arc<HaClient>),
 }
 
 impl BenchClient {
@@ -30,6 +33,7 @@ impl BenchClient {
         match self {
             BenchClient::Unified(client) => client.get(key).await,
             BenchClient::Shards(shards) => shards.get_client(key).get(key).await,
+            BenchClient::Ha(client) => client.get(key).await,
         }
     }
 
@@ -39,6 +43,7 @@ impl BenchClient {
     ) -> memcache::Result<std::collections::HashMap<String, Value>> {
         match self {
             BenchClient::Unified(client) => client.get_multi(keys).await,
+            BenchClient::Ha(client) => client.get_multi(keys).await,
             BenchClient::Shards(_) => {
                 // Route each key to its owning shard and merge. Sequential
                 // per-shard fan-out keeps the harness simple; GET coverage is
@@ -58,6 +63,7 @@ impl BenchClient {
         match self {
             BenchClient::Unified(client) => client.set(key, value, 0u32).await,
             BenchClient::Shards(shards) => shards.get_client(key).set(key, value, 0u32).await,
+            BenchClient::Ha(client) => client.set(key, value, 0u32).await,
         }
     }
 
@@ -65,6 +71,7 @@ impl BenchClient {
         match self {
             BenchClient::Unified(client) => client.incr(key, delta).await,
             BenchClient::Shards(shards) => shards.get_client(key).incr(key, delta).await,
+            BenchClient::Ha(client) => client.incr(key, delta).await,
         }
     }
 }

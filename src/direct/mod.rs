@@ -14,6 +14,8 @@
 
 pub mod sharding;
 
+pub mod ha;
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -24,6 +26,8 @@ use crate::sidecar::SidecarClient;
 use crate::value::{CasValue, ToMemcacheValue, Value};
 
 use sharding::Sharding;
+
+pub use ha::{HaClient, HaConfig};
 
 /// Configuration for one direct memcached backend.
 #[derive(Clone, Debug)]

@@ -72,6 +72,24 @@ struct Args {
     #[arg(long, value_delimiter = ',')]
     shards: Option<Vec<String>>,
 
+    /// Service mode: master endpoints (`host:port,...`), driven through the
+    /// SDK's `direct::HaClient` master/slave topology client. Combine with
+    /// --slave-l1 / --slaves.
+    #[arg(long, value_delimiter = ',')]
+    masters: Option<Vec<String>>,
+
+    /// Service mode: L1 slave endpoints (read-first tier).
+    #[arg(long, value_delimiter = ',')]
+    slave_l1: Option<Vec<String>>,
+
+    /// Service mode: L2 slave endpoints (read-next tier).
+    #[arg(long, value_delimiter = ',')]
+    slaves: Option<Vec<String>>,
+
+    /// Service mode: also write the slave tier (double-write).
+    #[arg(long)]
+    write_slave: bool,
+
     /// Hash algorithm for --shards (breeze mesh names, e.g. crc32).
     #[arg(long, default_value = "crc32")]
     hash: String,
@@ -455,6 +473,21 @@ async fn resolve(host_port: &str) -> Result<std::net::SocketAddr, String> {
 
 /// Build the client the harness will drive.
 fn build_client(args: &Args) -> Result<BenchClient, String> {
+    if let Some(masters) = &args.masters {
+        let server = server_config(args, &masters[0])?;
+        let mut ha = memcache::direct::HaConfig::new(masters.clone())
+            .with_sharding(&args.hash, &args.distribution)
+            .with_write_slave(args.write_slave)
+            .with_server(server);
+        if let Some(l1) = &args.slave_l1 {
+            ha = ha.with_slave_l1(l1.clone());
+        }
+        if let Some(slaves) = &args.slaves {
+            ha = ha.with_slaves(slaves.clone());
+        }
+        let client = memcache::direct::HaClient::connect(ha).map_err(|e| e.to_string())?;
+        return Ok(BenchClient::Ha(Arc::new(client)));
+    }
     if let Some(shards) = &args.shards {
         let mut clients = Vec::with_capacity(shards.len());
         for addr in shards {
@@ -471,7 +504,7 @@ fn build_client(args: &Args) -> Result<BenchClient, String> {
     }
 
     let ns = args.namespace.clone().ok_or_else(|| {
-        "one of --namespace, --direct, --shards, or --replay is required".to_string()
+        "one of --namespace, --direct, --shards, --masters, or --replay is required".to_string()
     })?;
     let cfg = MeshConfig::new(ns)
         .with_group(&args.group)

@@ -494,6 +494,73 @@ async fn binary_protocol_crud() {
     run_crud_suite(Protocol::Binary).await;
 }
 
+/// HA mode: writes go to the master tier; reads fall back down
+/// `slave_l1 → slave → master`. With double-write off, a key written
+/// through the HA client exists only on the master; with it on, the slave
+/// tier is written too.
+#[tokio::test]
+async fn ha_client_read_fallback_and_double_write() {
+    use memcache::direct::{DirectClient, HaClient, HaConfig, ServerConfig};
+
+    let port_master = spawn(Protocol::Binary).await;
+    let port_l1 = spawn(Protocol::Binary).await;
+    let port_slave = spawn(Protocol::Binary).await;
+    let addr = |port: u16| format!("127.0.0.1:{port}");
+    let direct =
+        |port: u16| DirectClient::connect(ServerConfig::new(&addr(port)).unwrap()).unwrap();
+
+    let config = HaConfig::new(vec![addr(port_master)])
+        .with_slave_l1(vec![addr(port_l1)])
+        .with_slaves(vec![addr(port_slave)])
+        .with_server(ServerConfig::new(&addr(port_master)).unwrap());
+
+    // --- fallback chain: key lives only on the master ---
+    let ha = HaClient::connect(config.clone()).unwrap();
+    ha.set("k", "from-master", 60u32).await.unwrap();
+    assert!(direct(port_l1).get("k").await.unwrap().is_none());
+    assert!(direct(port_slave).get("k").await.unwrap().is_none());
+    assert_eq!(
+        ha.get("k").await.unwrap().unwrap().as_string().unwrap(),
+        "from-master",
+        "read must fall back to the master tier"
+    );
+
+    // --- L1 serves reads first when it has the key ---
+    direct(port_l1).set("k", "from-l1", 60u32).await.unwrap();
+    assert_eq!(
+        ha.get("k").await.unwrap().unwrap().as_string().unwrap(),
+        "from-l1",
+        "read must be served by slave_l1 before master"
+    );
+
+    // --- slave tier serves reads when L1 misses ---
+    direct(port_l1).delete("k2").await.unwrap();
+    direct(port_slave)
+        .set("k2", "from-slave", 60u32)
+        .await
+        .unwrap();
+    assert_eq!(
+        ha.get("k2").await.unwrap().unwrap().as_string().unwrap(),
+        "from-slave",
+        "read must be served by the slave tier when L1 misses"
+    );
+
+    // --- double-write populates the slave tier ---
+    let ha_dw = HaClient::connect(config.with_write_slave(true)).unwrap();
+    ha_dw.set("dw", "v", 60u32).await.unwrap();
+    // The slave write runs in a spawned task; poll briefly.
+    let mut replicated = false;
+    for _ in 0..100 {
+        if direct(port_slave).get("dw").await.unwrap().is_some() {
+            replicated = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    assert!(replicated, "double-write must reach the slave tier");
+    assert!(direct(port_master).get("dw").await.unwrap().is_some());
+}
+
 /// Direct mode: `DirectClient` speaks to one backend over the pooled engine,
 /// and `Shards` routes keys to a stable backend via the mesh's hash +
 /// distribution algorithms. The unified `Client` enum works over both modes.
