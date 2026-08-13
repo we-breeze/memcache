@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -82,9 +83,10 @@ impl Connection {
     async fn ensure(&mut self, n: usize) -> Result<()> {
         while self.read_buf.len() < n {
             if self.fill().await? == 0 {
-                return Err(Error::Protocol(
-                    "connection closed with an incomplete frame".into(),
-                ));
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed with an incomplete frame",
+                )));
             }
         }
         Ok(())
@@ -108,9 +110,10 @@ impl Connection {
         buf.extend_from_slice(&self.read_buf.split_to(take));
         while buf.len() < n {
             if self.stream.read_buf(&mut buf).await? == 0 {
-                return Err(Error::Protocol(
-                    "connection closed with an incomplete frame".into(),
-                ));
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed with an incomplete frame",
+                )));
             }
         }
         Ok(buf.freeze())
@@ -128,9 +131,10 @@ impl Connection {
             }
             searched = self.read_buf.len().saturating_sub(1);
             if self.fill().await? == 0 {
-                return Err(Error::Protocol(
-                    "connection closed before end of line".into(),
-                ));
+                return Err(Error::Io(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed before end of line",
+                )));
             }
         }
     }
