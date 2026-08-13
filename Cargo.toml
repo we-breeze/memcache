@@ -41,12 +41,11 @@ tracing-subscriber = "0.3"
 # other member.
 [workspace]
 members = ["tools/mc-bench"]
-exclude = ["crates/discovery"]
 resolver = "2"
 
 [workspace.dependencies]
-# External Breeze submodule, kept outside this repository's Cargo workspace.
-brz-discovery = { package = "discovery", path = "crates/discovery" }
+# Shared Breeze checkout managed by the consuming repository.
+brz-discovery = { package = "discovery", path = "../discovery" }
 # Shared with the redis SDK: the bench harness installs this allocator at
 # its binary composition root to get mimalloc + per-request allocation
 # accounting. The SDK itself stays allocator-agnostic.
