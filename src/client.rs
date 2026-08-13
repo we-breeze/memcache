@@ -3,9 +3,7 @@
 //! `Client` is an enum over [`crate::sidecar::SidecarClient`] (mesh access)
 //! and [`crate::direct::DirectClient`] (direct backend access), exposing the
 //! whole memcached operation surface on either — useful for code paths that
-//! serve resources of mixed modes. (Replay topologies use
-//! [`crate::replay::ReplayConnection`] directly: it is a single-use
-//! connection, not a pooled client.)
+//! serve resources of mixed modes.
 
 use std::collections::HashMap;
 

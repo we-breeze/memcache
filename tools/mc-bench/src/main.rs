@@ -2,7 +2,7 @@
 //!
 //! Runs a fixed number of operations across `--concurrency` async workers
 //! and reports throughput plus latency percentiles (p50/p95/p99). It drives
-//! the SDK's three access modes:
+//! the SDK's access modes:
 //!
 //! - **sidecar mode** (default, `--namespace`): through
 //!   [`SidecarClient`](memcache::sidecar::SidecarClient), measuring the full
@@ -12,16 +12,10 @@
 //!   direct-backend stack straight to a raw memcached.
 //! - **shards mode** (`--shards h:p,h:p,...`): through
 //!   [`Shards`](memcache::direct::Shards), the client-side shard router.
-//! - **replay mode** (`--replay host:port`, feature `replay`): through
-//!   [`memcache::replay`], the single-persistent-connection
-//!   replay/comparison client. GET-only; each worker owns its own
-//!   connection (the replay client is `&mut` single-stream by design).
-//!
 //! Usage:
 //!   mc-bench --namespace my_ns --concurrency 64 --ops 100000 get
 //!   mc-bench --direct 127.0.0.1:11211 --concurrency 64 --ops 100000 set
 //!   mc-bench --shards 127.0.0.1:11211,127.0.0.1:11212 --ops 100000 get
-//!   mc-bench --replay 127.0.0.1:11211 --concurrency 64 --ops 100000
 //!
 //! # Exit code
 //!
@@ -59,12 +53,6 @@ struct Args {
     /// the SDK's `direct::DirectClient` (no mesh).
     #[arg(long)]
     direct: Option<String>,
-
-    /// Replay mode: connect to a raw `host:port` memcached through
-    /// `memcache::replay` (single persistent connection per worker,
-    /// GET-only).
-    #[arg(long)]
-    replay: Option<String>,
 
     /// Shards mode: comma-separated direct backends
     /// (`host:port,host:port,...`), driven through the SDK's
@@ -310,10 +298,6 @@ async fn run(mut args: Args) -> i32 {
         return 2;
     }
 
-    if args.replay.is_some() {
-        return run_replay(args, injector).await;
-    }
-
     let workload: WorkloadKind = args.workload.into();
 
     let client = match build_client(&args) {
@@ -446,13 +430,6 @@ async fn inject_faults(args: &mut Args, injector: Arc<FaultInjector>) -> Result<
         args.direct = Some(proxy.to_string());
         return Ok(());
     }
-    if let Some(addr) = args.replay.clone() {
-        let target = resolve(&addr).await?;
-        let proxy = fault::start_proxy(target, injector).await?;
-        eprintln!("fault proxy: {proxy} -> {target}");
-        args.replay = Some(proxy.to_string());
-        return Ok(());
-    }
     if let Some(ns) = args.namespace.clone() {
         let endpoint = memcache::sidecar::discovery::discover(
             std::path::Path::new(&args.socket_dir),
@@ -476,7 +453,7 @@ async fn inject_faults(args: &mut Args, injector: Arc<FaultInjector>) -> Result<
         args.socket_dir = dir.to_string_lossy().into_owned();
         return Ok(());
     }
-    Err("fault injection requires one of --namespace/--direct/--shards/--replay".to_string())
+    Err("fault injection requires one of --namespace/--direct/--shards".to_string())
 }
 
 async fn resolve(host_port: &str) -> Result<std::net::SocketAddr, String> {
@@ -546,7 +523,7 @@ fn build_client(args: &Args) -> Result<BenchClient, String> {
     }
 
     let ns = args.namespace.clone().ok_or_else(|| {
-        "one of --namespace, --direct, --shards, --masters, or --replay is required".to_string()
+        "one of --namespace, --direct, --shards, or --masters is required".to_string()
     })?;
     let cfg = MeshConfig::new(ns)
         .with_group(&args.group)
@@ -841,198 +818,4 @@ fn report(summary: &Summary, elapsed: Duration, memory: &MemoryWindow) {
     }
     memory.print();
     println!("==========================");
-}
-
-/// Replay mode (feature `replay`): each worker owns one
-/// [`memcache::replay::ReplayConnection`] (the client is a `&mut`
-/// single-stream connection by design, mirroring the replay proxy's lane
-/// model) and issues sequential GETs. Seeding goes through the SDK's direct
-/// client, since the replay client is read-only.
-#[cfg(feature = "replay")]
-async fn run_replay(args: Args, injector: Option<Arc<FaultInjector>>) -> i32 {
-    use memcache::replay::ReplayConnection;
-
-    let addr = args.replay.clone().unwrap();
-    let Some((host, port)) = addr.rsplit_once(':') else {
-        eprintln!("error: --replay expects host:port, got '{addr}'");
-        return 2;
-    };
-    let Ok(port) = port.parse::<u16>() else {
-        eprintln!("error: invalid port in --replay '{addr}'");
-        return 2;
-    };
-    let host = host.to_string();
-
-    // Textual keys (the replay client takes `&str`).
-    let keys: Arc<Vec<String>> =
-        Arc::new((0..args.keys).map(|i| format!("mc:bench:{i}")).collect());
-
-    eprintln!(
-        "mc-bench: replay={host}:{port} keys={} concurrency={}",
-        keys.len(),
-        args.concurrency
-    );
-
-    // Seed through the SDK direct client (concurrently); values are the
-    // self-describing `key || i` content so spot-checks detect mixups.
-    eprintln!("seeding {} keys...", keys.len());
-    {
-        let cfg = match ServerConfig::new(&addr) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                eprintln!("error: {e}");
-                return 2;
-            }
-        };
-        let seeder = match DirectClient::connect(cfg) {
-            Ok(client) => client,
-            Err(e) => {
-                eprintln!("error: failed to connect for seeding: {e}");
-                return 2;
-            }
-        };
-        let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let mut seed_handles = Vec::new();
-        for _ in 0..8.min(keys.len().max(1)) {
-            let seeder = seeder.clone();
-            let keys = keys.clone();
-            let next = next.clone();
-            seed_handles.push(tokio::spawn(async move {
-                loop {
-                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    if i >= keys.len() {
-                        return true;
-                    }
-                    let value = format!("{}{:020}", keys[i], i);
-                    let mut ok = false;
-                    for _ in 0..5 {
-                        if matches!(seeder.set(&keys[i], value.as_str(), 0u32).await, Ok(true)) {
-                            ok = true;
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                    if !ok {
-                        return false;
-                    }
-                }
-            }));
-        }
-        for h in seed_handles {
-            match h.await {
-                Ok(true) => {}
-                Ok(false) => {
-                    eprintln!("error: a seed SET failed");
-                    return 2;
-                }
-                Err(e) => {
-                    eprintln!("error: seed task failed: {e}");
-                    return 2;
-                }
-            }
-        }
-        // Verify the seeded key/value correspondence before measuring.
-        for (i, key) in keys.iter().enumerate() {
-            match seeder.get(key).await {
-                Ok(Some(v)) if v.as_bytes().starts_with(key.as_bytes()) => {}
-                other => {
-                    eprintln!("error: seed verification failed at {key} (index {i}): {other:?}");
-                    return 2;
-                }
-            }
-        }
-        eprintln!("seed data verified: {} keys", keys.len());
-    }
-
-    let mode = if args.ops > 0 {
-        RunMode::Count(args.ops)
-    } else {
-        RunMode::Timed(Duration::from_secs(args.duration))
-    };
-    let budget = Arc::new(OpBudget::new(match &mode {
-        RunMode::Count(n) => *n,
-        RunMode::Timed(_) => u64::MAX,
-    }));
-    let deadline = match &mode {
-        RunMode::Timed(d) => Some(Instant::now() + *d),
-        RunMode::Count(_) => None,
-    };
-    let bounded = matches!(mode, RunMode::Count(_));
-
-    eprintln!("running (replay, get)...");
-    let mem_before = brz_mem::heap();
-    let start = Instant::now();
-
-    let mut handles = Vec::with_capacity(args.concurrency);
-    for w in 0..args.concurrency {
-        let host = host.clone();
-        let keys = keys.clone();
-        let budget = budget.clone();
-        let warmup = args.warmup;
-        let injector = injector.clone();
-        handles.push(tokio::spawn(async move {
-            let mut local = WorkerStats::new();
-            let mut conn = match ReplayConnection::connect(&host, port).await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    eprintln!("worker {w}: connect failed: {e}");
-                    local.record_error();
-                    return local;
-                }
-            };
-            let mut op = (w as u64) * 1_000_000;
-            // Warm-up ops prime the connection and are not recorded, nor do
-            // they consume the op budget.
-            for i in 0..warmup {
-                let key = &keys[(w * warmup + i) % keys.len()];
-                let _ = conn.get(key).await;
-            }
-            loop {
-                if let Some(dl) = deadline
-                    && Instant::now() >= dl
-                {
-                    break;
-                }
-                if bounded && !budget.try_claim() {
-                    break;
-                }
-                let key = &keys[(op as usize) % keys.len()];
-                if let Some(injector) = &injector {
-                    injector.maybe_delay().await;
-                }
-                let t = Instant::now();
-                let ok = conn.get(key).await.is_ok();
-                let elapsed = t.elapsed();
-                if ok {
-                    local.record(elapsed);
-                } else {
-                    local.record_error();
-                }
-                op += 1;
-            }
-            local
-        }));
-    }
-
-    let mut summary = Summary::new();
-    for h in handles {
-        if let Ok(local) = h.await {
-            local.add_to(&mut summary);
-        }
-    }
-    if let Some(injector) = &injector {
-        let (slow, timeout, reset, outage) = injector.counts();
-        eprintln!(
-            "fault injection: slow={slow} timeout={timeout} reset={reset} outage={outage} injected"
-        );
-    }
-    finish(&summary, start.elapsed(), mem_before, &args)
-}
-
-/// Stub when the `replay` feature is off.
-#[cfg(not(feature = "replay"))]
-async fn run_replay(_args: Args, _injector: Option<Arc<FaultInjector>>) -> i32 {
-    eprintln!("error: --replay requires the `replay` feature");
-    eprintln!("hint:  cargo run -p mc-bench --features replay -- --replay host:port");
-    2
 }

@@ -1,7 +1,7 @@
 //! # memcache
 //!
 //! A high-performance, high-availability async memcached client for the
-//! breeze platform, with **three explicitly separated access modes**:
+//! breeze platform, with **two explicitly separated access modes**:
 //!
 //! ## Mesh mode — [`sidecar`]
 //!
@@ -48,14 +48,6 @@
 //! # }
 //! ```
 //!
-//! ## Replay mode — [`replay`] (feature `direct-tcp`)
-//!
-//! A direct-TCP **text-protocol** client for replay/comparison topologies:
-//! single persistent connection ([`replay::ReplayConnection`]) and the
-//! crc32/modula node-selection pool ([`replay::MemcachePool`]) that
-//! reproduces the source service's `SockIOPool.NEW_COMPAT_HASH` routing, so
-//! a replay proxy can lane-match recorded memcached exchanges.
-//!
 //! ## Application API — [`Memcache`], [`CacheService`], and direct access
 //!
 //! Application code should depend on the small [`Memcache`] contract.
@@ -91,9 +83,6 @@ mod service;
 pub mod service;
 pub mod sidecar;
 pub mod value;
-
-#[cfg(feature = "direct-tcp")]
-pub mod replay;
 
 mod api;
 mod connection;

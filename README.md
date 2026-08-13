@@ -1,7 +1,7 @@
 # memcache
 
 A high-performance, high-availability **async memcached client** (Rust /
-tokio) for the breeze platform, with **three explicitly separated access
+tokio) for the breeze platform, with **two explicitly separated access
 modes**:
 
 - **Mesh mode** ([`sidecar`]) — talk to the local breeze mesh agent,
@@ -10,10 +10,6 @@ modes**:
 - **Direct backend mode** ([`direct`]) — connect to memcached backends
   directly, with client-side shard routing using the same hash/distribution
   algorithms as the mesh. (The *byTcp* path.)
-- **Replay mode** ([`replay`], feature `direct-tcp`) — a direct-TCP
-  text-protocol client for replay/comparison topologies, reproducing the
-  source service's `SockIOPool.NEW_COMPAT_HASH` (crc32 + modula) node
-  selection so a replay proxy can lane-match recorded exchanges.
 - **Cache-service templates** ([`service`], feature `service`) — a Rust port
   of the Java `commons-memcache` templates: `MemcacheServiceTemplate`
   (primary cache-service client with backup fallback) and `MemCacheTemplate`
@@ -167,19 +163,6 @@ shards.get_client("u:42").set("u:42", "data", 60u32).await?;
 # }
 ```
 
-## Replay mode (feature `direct-tcp`)
-
-For replay/comparison topologies the SDK talks directly to recorded
-memcached nodes over the text protocol:
-
-- `replay::ReplayConnection` — one persistent `TcpStream` for a whole read
-  sequence (`get` / `get_multi`), so the replay proxy can lane-match against
-  a recorded connection's command stream. Read-only, bounded, and dropped on
-  any error.
-- `replay::MemcachePool` + `replay::new_compat_hash` — the source service's
-  crc32 + modula node selection; build from the master list discovered via
-  the cacheservice statics config ([`cacheservice::CacheServiceConfig`]).
-
 ## Unified proxy
 
 `memcache::Client` is an enum over the sidecar and direct clients, exposing
@@ -268,14 +251,13 @@ subscriber to route these logs to your sink.
 
 ```bash
 cargo fmt --check
-cargo clippy --all-targets --features direct-tcp -- -D warnings
-cargo test --features direct-tcp
+cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
 The test suite includes an in-process fake memcached server that exercises
 the full request/response path for both protocols; no external server is
-required. Integration tests against a real memcached (Docker) are gated
-behind `direct-tcp` and `#[ignore]`.
+required.
 
 ## Cache-service templates (feature `service`)
 
@@ -311,11 +293,11 @@ cargo test --features service --test yaml_integration -- --ignored
 per-request allocation accounting (via `brz-mem`), reply verification
 (`--verify` detects request/response mixups), and TCP fault injection
 (`--slow-rate`, `--timeout-rate`, `--reset-rate`, `--outage-ms`,
-client-side `--cpu-stall-rate`). It drives all three access modes:
+client-side `--cpu-stall-rate`). It drives the sidecar, direct, sharded, and
+cache-service access modes:
 
 ```bash
 cargo run -p mc-bench --release -- --namespace my_ns -c 64 -n 1000000 get
 cargo run -p mc-bench --release -- --direct 127.0.0.1:11211 -c 64 set
 cargo run -p mc-bench --release -- --shards 10.0.0.1:11211,10.0.0.2:11211 get
-cargo run -p mc-bench --release -- --replay 127.0.0.1:11211 -c 64 get
 ```

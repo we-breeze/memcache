@@ -6,7 +6,6 @@
 # 模式（MODE 环境变量）：
 #   direct   （默认）SDK direct::DirectClient 直连 memcached
 #   sidecar  用假 sock 文件模拟 mesh 发布，走完整 sidecar 链路
-#   replay   memcache::replay 单连接客户端（仅 GET）
 #   shards   N 个原生 memcached 当分片，走 direct::Shards 客户端路由
 #   service  master + slave_l1 + slave 三实例，走 direct::HaClient
 #            主从拓扑客户端（写 master、读逐级回退；WRITE_SLAVE=1 双写）
@@ -23,7 +22,6 @@
 #     ./bench_local.sh --ops 1000000 get                      # direct 模式
 #     ./bench_local.sh -c 64 -d 60 getmulti                   # 60 秒时长模式，4 key 多取
 #     MODE=sidecar ./bench_local.sh --ops 1000000 get         # sidecar（假 sock 文件）
-#     MODE=replay  ./bench_local.sh --ops 100000              # replay（GET）
 #     MODE=shards SHARDS=4 ./bench_local.sh --ops 1000000 get # N 个本机 memcached 分片
 #     MODE=service ./bench_local.sh --ops 1000000 get         # master/slave 拓扑
 #     MODE=service WRITE_SLAVE=1 ./bench_local.sh --ops 1000000 get  # 双写 slave 层
@@ -56,7 +54,7 @@
 #     MATRIX=1 MODE=service ./bench_local.sh    # 主从拓扑跑全套场景
 #
 # 环境变量：
-#   MODE        direct | sidecar | replay | shards | service（默认 direct）
+#   MODE        direct | sidecar | shards | service | service-yaml（默认 direct）
 #   MATRIX      1 = 跑完整压测矩阵（默认关）
 #   MC_PORT        master/单实例端口（默认 21311；shards 占用 MC_PORT..MC_PORT+SHARDS-1，
 #               service 占用 MC_PORT(master)、MC_PORT+1(slave_l1)、MC_PORT+2(slave)）
@@ -148,10 +146,6 @@ prepare() {
       echo "sidecar 模式: 已发布 sock 文件 $(basename "$sock")"
       TARGET_ARGS=(--namespace "$NAMESPACE" --group "$GROUP" --socket-dir "$SOCK_DIR")
       ;;
-    replay)
-      ensure_memcached "$MC_PORT"
-      TARGET_ARGS=(--replay "127.0.0.1:$MC_PORT")
-      ;;
     shards)
       local addrs=""
       for i in $(seq 0 $((SHARDS - 1))); do
@@ -195,7 +189,7 @@ prepare() {
       fi
       ;;
     *)
-      echo "error: 未知 MODE '$MODE'（direct | sidecar | replay | shards | service | service-yaml）" >&2
+      echo "error: 未知 MODE '$MODE'（direct | sidecar | shards | service | service-yaml）" >&2
       exit 2
       ;;
   esac
