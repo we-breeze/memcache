@@ -4,7 +4,7 @@
 
 This is the high-performance, high-availability async **memcached client SDK**
 for the example breeze platform (Rust / tokio). It implements both the text and
-binary wire protocols and offers three explicitly separated access modes:
+binary wire protocols and offers two explicitly separated access modes:
 
 - **Mesh mode** (`src/sidecar/`): talk to the local breeze mesh agent,
   discovered from the sock registry files it publishes (`@mc:<port>@cs`);
@@ -13,10 +13,6 @@ binary wire protocols and offers three explicitly separated access modes:
   with client-side shard routing (`direct::Shards`) using the same
   hash/distribution algorithms as the mesh (`direct::sharding`), plus the
   master/slave/L1 topology client `direct::HaClient`. (The *byTcp* path.)
-- **Replay mode** (`src/replay.rs`, feature `direct-tcp`): a direct-TCP
-  text-protocol client for replay/comparison topologies, reproducing the
-  source service's crc32+modula node selection.
-
 On top of these, `src/service/` (feature `service`) ports the Java
 commons-memcache template stack: `Cacheable`, `MemcacheServiceTemplate`
 (primary/backup routing with a circuit breaker), `MemCacheTemplate`
@@ -33,7 +29,7 @@ The crate is also the workspace root; the load-test harness lives in
 
 ```bash
 cargo fmt --all
-cargo test --features service        # superset: unit + e2e (in-process fake server)
+cargo test --all-features            # superset: unit + e2e (in-process fake server)
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
@@ -41,7 +37,6 @@ Feature combinations worth knowing:
 
 ```bash
 cargo test                            # default features
-cargo test --features direct-tcp      # + replay mode tests
 cargo test --features service         # + service template tests (incl. local-memcached IT)
 ```
 
@@ -49,7 +44,6 @@ Docker-dependent integration tests are `#[ignore]`-gated; run them
 explicitly when touching that area:
 
 ```bash
-cargo test --features direct-tcp --test direct_integration -- --ignored
 cargo test --features service --test yaml_integration -- --ignored   # needs Docker
 ```
 
@@ -69,8 +63,7 @@ and runs use `--verify` so request/response mixups fail the run.
 
 - **Before every commit: run `cargo fmt --all` and the test suite; commit
   only when everything passes.** Push after the tests pass.
-- **Commit messages are always written in Chinese.** Never force-push to
-  `master` (the remote rejects it anyway).
+- Never force-push to `master` (the remote rejects it anyway).
 - Keep async code on `tokio`.
 - The binary protocol correlates every response to its request by opaque
   token; any timeout, I/O error, or opaque mismatch must drop the

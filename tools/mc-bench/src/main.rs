@@ -12,6 +12,7 @@
 //!   direct-backend stack straight to a raw memcached.
 //! - **shards mode** (`--shards h:p,h:p,...`): through
 //!   [`Shards`](memcache::direct::Shards), the client-side shard router.
+//!
 //! Usage:
 //!   mc-bench --namespace my_ns --concurrency 64 --ops 100000 get
 //!   mc-bench --direct 127.0.0.1:11211 --concurrency 64 --ops 100000 set
