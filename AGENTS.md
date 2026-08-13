@@ -26,10 +26,12 @@ The crate is also the workspace root; the load-test harness lives in
 ## Read First
 
 - Backend engineering standards for AI coding work (required for any
-  product-code change; sibling checkout of traffic-e2e):
-  `../../traffic-e2e/plugins/ai-software-engineering/skills/backend-engineering/SKILL.md`
+  product-code change; linked into the user-level skills directory):
+  `~/.claude/skills/backend-engineering/SKILL.md`
   — read it fully before changing product code, and follow its
   `references/code-organization.md` boundary and size rules during the work.
+  Fallback location (sibling checkout of traffic-e2e):
+  `../../traffic-e2e/plugins/ai-software-engineering/skills/backend-engineering/SKILL.md`
 
 ## Essential Commands
 
@@ -71,14 +73,15 @@ and runs use `--verify` so request/response mixups fail the run.
 
 - **Use the `backend-engineering` skill as the binding constraint for all
   product-code work**: before changing product code, read
-  `../../traffic-e2e/plugins/ai-software-engineering/skills/backend-engineering/SKILL.md`
+  `~/.claude/skills/backend-engineering/SKILL.md` (fallback:
+  `../../traffic-e2e/plugins/ai-software-engineering/skills/backend-engineering/SKILL.md`)
   and apply its standards (working method, resource budgets, resilience,
   verification) together with its
   `references/code-organization.md` rules. Treat the initial module boundary
   as a hypothesis and review the implemented responsibilities again before
   completion. Keep feature-local structural convergence in scope and
-  unrelated legacy cleanup out of scope. If the sibling traffic-e2e checkout
-  is unavailable, state that and apply this file's own rules as the floor.
+  unrelated legacy cleanup out of scope. If neither location is available,
+  state that and apply this file's own rules as the floor.
 - **Before every commit: run `cargo fmt --all` and the test suite; commit
   only when everything passes.** Push after the tests pass.
 - Never force-push to `master` (the remote rejects it anyway).
