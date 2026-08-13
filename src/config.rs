@@ -65,6 +65,11 @@ pub struct Config {
     pub pool_wait_timeout: Duration,
     /// Disable Nagle's algorithm on TCP connections.
     pub tcp_nodelay: bool,
+    /// Retries for idempotent reads (`get` / `get_multi` / `get_cas` /
+    /// `touch`) after a timeout or I/O error, each attempt on a fresh pooled
+    /// connection. `0` disables retries. Writes are never retried (a
+    /// retried non-idempotent write may be applied twice).
+    pub read_retries: u32,
     /// Reject keys longer than 250 bytes (memcached's hard limit).
     ///
     /// When `false` the key is passed through unchecked, matching the mesh
@@ -99,6 +104,7 @@ impl Config {
             op_timeout: Duration::from_millis(400),
             pool_wait_timeout: Duration::from_millis(500),
             tcp_nodelay: true,
+            read_retries: 1,
             validate_keys: true,
         }
     }
@@ -143,6 +149,13 @@ impl Config {
     /// Set the per-operation timeout.
     pub fn with_op_timeout(mut self, timeout: Duration) -> Self {
         self.op_timeout = timeout;
+        self
+    }
+
+    /// Set the number of idempotent-read retries after a timeout or I/O
+    /// error (0 disables retries).
+    pub fn with_read_retries(mut self, retries: u32) -> Self {
+        self.read_retries = retries;
         self
     }
 

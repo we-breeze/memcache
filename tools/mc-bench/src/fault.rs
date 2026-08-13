@@ -216,7 +216,8 @@ async fn forward(inbound: TcpStream, target: std::net::SocketAddr, injector: Arc
             Ok(_) => {}
         }
         // Unexpected framing (not a multibulk): forward raw, never delay.
-        if buf.first() != Some(&b'*') {
+        // A memcached binary frame starts with the 0x80 request magic.
+        if buf.first() != Some(&b'*') && buf.first() != Some(&0x80) {
             if wo.write_all(&buf).await.is_err() {
                 break;
             }
@@ -244,6 +245,15 @@ async fn forward(inbound: TcpStream, target: std::net::SocketAddr, injector: Arc
 /// `buf`, or `None` if incomplete (or empty). Expects `*N\r\n` followed by
 /// N `$len\r\n<bytes>\r\n` bulks (what this SDK sends).
 fn parse_frame(buf: &[u8]) -> Option<usize> {
+    // Memcached binary protocol: 24-byte header, body length at [8..12].
+    if buf.first() == Some(&0x80) {
+        if buf.len() < 24 {
+            return None;
+        }
+        let body_len = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
+        let total = 24usize.checked_add(body_len)?;
+        return (buf.len() >= total).then_some(total);
+    }
     if buf.first() != Some(&b'*') {
         return None;
     }

@@ -150,12 +150,16 @@ impl SidecarClient {
 
     /// Fetch a single value.
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
-        self.run("get", || key.to_string(), async {
-            self.validate_key(key)?;
-            let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.get(key)).await;
-            Self::discard_on_error(obj, result)
-        })
+        self.run_read(
+            "get",
+            || key.to_string(),
+            || async {
+                self.validate_key(key)?;
+                let mut obj = self.pool.get().await?;
+                let result = self.timed(obj.get(key)).await;
+                Self::discard_on_error(obj, result)
+            },
+        )
         .await
     }
 
@@ -164,25 +168,33 @@ impl SidecarClient {
         // The key list is only materialized for the error log on failure;
         // joining unconditionally would cost one allocation per call on the
         // hot path.
-        self.run("getMulti", || keys.join(","), async {
-            for key in keys {
-                self.validate_key(key)?;
-            }
-            let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.get_multi(keys)).await;
-            Self::discard_on_error(obj, result)
-        })
+        self.run_read(
+            "getMulti",
+            || keys.join(","),
+            || async {
+                for key in keys {
+                    self.validate_key(key)?;
+                }
+                let mut obj = self.pool.get().await?;
+                let result = self.timed(obj.get_multi(keys)).await;
+                Self::discard_on_error(obj, result)
+            },
+        )
         .await
     }
 
     /// Fetch a value together with its CAS token.
     pub async fn get_cas(&self, key: &str) -> Result<Option<CasValue>> {
-        self.run("getCas", || key.to_string(), async {
-            self.validate_key(key)?;
-            let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.get_cas(key)).await;
-            Self::discard_on_error(obj, result)
-        })
+        self.run_read(
+            "getCas",
+            || key.to_string(),
+            || async {
+                self.validate_key(key)?;
+                let mut obj = self.pool.get().await?;
+                let result = self.timed(obj.get_cas(key)).await;
+                Self::discard_on_error(obj, result)
+            },
+        )
         .await
     }
 
@@ -308,12 +320,16 @@ impl SidecarClient {
     /// Update a key's expiration without fetching its value.
     pub async fn touch(&self, key: &str, expire: impl Into<Expiration>) -> Result<bool> {
         let expire = expire.into();
-        self.run("touch", || key.to_string(), async move {
-            self.validate_key(key)?;
-            let mut obj = self.pool.get().await?;
-            let result = self.timed(obj.touch(key, expire)).await;
-            Self::discard_on_error(obj, result)
-        })
+        self.run_read(
+            "touch",
+            || key.to_string(),
+            || async move {
+                self.validate_key(key)?;
+                let mut obj = self.pool.get().await?;
+                let result = self.timed(obj.touch(key, expire)).await;
+                Self::discard_on_error(obj, result)
+            },
+        )
         .await
     }
 
@@ -377,6 +393,28 @@ impl SidecarClient {
             );
         }
         result
+    }
+
+    /// Run an idempotent read with bounded retries: after a timeout or I/O
+    /// error the operation is re-issued on a fresh pooled connection (the
+    /// failed one was already discarded by `discard_on_error`). Writes never
+    /// come through here — a retried non-idempotent write may be applied
+    /// twice.
+    async fn run_read<T, F, Fut>(&self, method: &str, key: impl Fn() -> String, op: F) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: Future<Output = Result<T>>,
+    {
+        let mut attempt = 0u32;
+        loop {
+            let result = self.run(method, &key, op()).await;
+            let retriable = matches!(result, Err(Error::Timeout | Error::Io(_)));
+            if retriable && attempt < self.config.read_retries {
+                attempt += 1;
+                continue;
+            }
+            return result;
+        }
     }
 
     /// Whether `err` leaves the connection in an unknown state, so it must be

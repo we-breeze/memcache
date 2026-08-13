@@ -780,45 +780,50 @@ async fn binary_desynced_frame_drops_connection() {
 async fn binary_timeout_drops_connection() {
     use std::time::Duration;
 
-    // Server that accepts connections but never answers the first request;
-    // answers subsequent requests (on new connections) normally.
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        let mut conn_count = 0u32;
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                break;
-            };
-            conn_count += 1;
-            let conn_no = conn_count;
-            tokio::spawn(async move {
-                loop {
-                    let mut header = [0u8; 24];
-                    if sock.read_exact(&mut header).await.is_err() {
-                        return;
+    // Spawn a server that never answers on its first connection (forcing a
+    // timeout) and answers normally on every later connection.
+    async fn spawn_flaky_server() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let mut conn_count = 0u32;
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                conn_count += 1;
+                let conn_no = conn_count;
+                tokio::spawn(async move {
+                    loop {
+                        let mut header = [0u8; 24];
+                        if sock.read_exact(&mut header).await.is_err() {
+                            return;
+                        }
+                        let body_len =
+                            u32::from_be_bytes([header[8], header[9], header[10], header[11]])
+                                as usize;
+                        let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
+                        let mut body = vec![0u8; body_len];
+                        if sock.read_exact(&mut body).await.is_err() {
+                            return;
+                        }
+                        if conn_no == 1 {
+                            // Never answer on the first connection: force a timeout.
+                            continue;
+                        }
+                        let response = frame(0x00, 0x0001, &[], &[], b"not found", opaque, 0);
+                        if sock.write_all(&response).await.is_err() {
+                            return;
+                        }
+                        let _ = sock.flush().await;
                     }
-                    let body_len =
-                        u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
-                    let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
-                    let mut body = vec![0u8; body_len];
-                    if sock.read_exact(&mut body).await.is_err() {
-                        return;
-                    }
-                    if conn_no == 1 {
-                        // Never answer on the first connection: force a timeout.
-                        continue;
-                    }
-                    let response = frame(0x00, 0x0001, &[], &[], b"not found", opaque, 0);
-                    if sock.write_all(&response).await.is_err() {
-                        return;
-                    }
-                    let _ = sock.flush().await;
-                }
-            });
-        }
-    });
+                });
+            }
+        });
+        port
+    }
 
+    let port = spawn_flaky_server().await;
     let client = SidecarClient::new(
         Config::tcp("127.0.0.1", port)
             .with_protocol(Protocol::Binary)
@@ -827,8 +832,23 @@ async fn binary_timeout_drops_connection() {
     )
     .unwrap();
 
-    // First request times out; the connection must be dropped rather than
-    // returned to the pool with a (never-arriving) pending response.
+    // With the default read retry, the first attempt times out (the first
+    // connection never answers) and the retry is issued on a fresh
+    // connection — which the server answers.
+    assert!(client.get("k").await.unwrap().is_none());
+
+    // With retries disabled, the first request times out; the connection
+    // must be dropped rather than returned to the pool with a
+    // (never-arriving) pending response.
+    let port = spawn_flaky_server().await;
+    let client = SidecarClient::new(
+        Config::tcp("127.0.0.1", port)
+            .with_protocol(Protocol::Binary)
+            .with_max_connections(1)
+            .with_op_timeout(Duration::from_millis(100))
+            .with_read_retries(0),
+    )
+    .unwrap();
     let err = client.get("k").await.unwrap_err();
     assert!(
         matches!(err, memcache::Error::Timeout),

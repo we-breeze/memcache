@@ -688,12 +688,26 @@ async fn verify_seeds(client: &BenchClient, pool: &Arc<driver::Pool>) -> Result<
                     break;
                 }
                 let key = pool.key(i);
-                match client.get(key).await {
-                    Ok(Some(value)) if driver::expected_value_matches(key.as_bytes(), &value) => {}
-                    other => {
-                        let prior = mismatches.fetch_add(1, Ordering::Relaxed);
-                        if prior == 0 {
-                            eprintln!("seed mismatch at key index {i}: {other:?}");
+                // Transient errors (fault injection may slow or hang a
+                // request) are retried; only a persistent mismatch counts.
+                let mut attempt = 0;
+                loop {
+                    match client.get(key).await {
+                        Ok(Some(value))
+                            if driver::expected_value_matches(key.as_bytes(), &value) =>
+                        {
+                            break;
+                        }
+                        other => {
+                            attempt += 1;
+                            if attempt >= 5 {
+                                let prior = mismatches.fetch_add(1, Ordering::Relaxed);
+                                if prior == 0 {
+                                    eprintln!("seed mismatch at key index {i}: {other:?}");
+                                }
+                                break;
+                            }
+                            tokio::time::sleep(Duration::from_millis(20)).await;
                         }
                     }
                 }
