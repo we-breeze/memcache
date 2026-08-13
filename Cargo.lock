@@ -776,7 +776,6 @@ dependencies = [
  "discovery",
  "futures-util",
  "md5",
- "memchr",
  "rand 0.8.7",
  "serde",
  "serde_yaml",

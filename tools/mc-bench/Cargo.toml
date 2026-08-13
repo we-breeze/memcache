@@ -11,13 +11,10 @@ name = "mc-bench"
 path = "src/main.rs"
 
 [features]
-default = ["memory-stats", "replay"]
+default = ["memory-stats"]
 # Enable brz-mem's heap accounting (per-request allocation tracking). Off
 # removes the bookkeeping overhead from the hot path for pure-throughput runs.
 memory-stats = ["brz-mem/heap-stats"]
-# Enable the --replay mode (drives memcache::replay, the replay/comparison
-# direct-TCP client).
-replay = ["memcache/direct-tcp"]
 # Enable the --template mode (drives memcache::service::MemCacheTemplate,
 # the multi-tier master/slave/L1 backup template).
 template = ["memcache/service"]

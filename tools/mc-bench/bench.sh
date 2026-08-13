@@ -21,7 +21,6 @@
 #     MODE=shards SHARDS=4 ./bench.sh --ops 1000000 get
 #     MODE=service ./bench.sh --ops 1000000 get
 #     MODE=service WRITE_SLAVE=1 ./bench.sh --ops 1000000 get
-#     ./bench.sh --replay 127.0.0.1:21311 --ops 100000      # replay 客户端（GET）
 #
 #   故障注入：
 #     ./bench.sh --ops 1000000 get --slow-rate 0.0001 --slow-ms 200

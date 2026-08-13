@@ -9,8 +9,7 @@
 //!   whether it is routed by this client or by the mesh.
 //!
 //! For mesh access (discovery, no client-side sharding), see
-//! [`crate::sidecar`]; for replay/comparison topologies, see
-//! [`crate::replay`].
+//! [`crate::sidecar`].
 
 pub mod sharding;
 

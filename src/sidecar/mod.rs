@@ -15,8 +15,7 @@
 //! - [`MeshConfig`] — namespace/group/socket-dir/protocol/pool/timeout
 //!   settings.
 //!
-//! For direct backend access (no mesh), see [`crate::direct`]; for
-//! replay/comparison topologies, see [`crate::replay`].
+//! For direct backend access (no mesh), see [`crate::direct`].
 
 pub mod client;
 pub mod config;

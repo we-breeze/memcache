@@ -1,7 +1,7 @@
 //! # memcache
 //!
 //! A high-performance, high-availability async memcached client for the
-//! breeze platform, with **three explicitly separated access modes**:
+//! breeze platform, with **two explicitly separated access modes**:
 //!
 //! ## Mesh mode — [`sidecar`]
 //!
@@ -48,21 +48,14 @@
 //! # }
 //! ```
 //!
-//! ## Replay mode — [`replay`] (feature `direct-tcp`)
-//!
-//! A direct-TCP **text-protocol** client for replay/comparison topologies:
-//! single persistent connection ([`replay::ReplayConnection`]) and the
-//! crc32/modula node-selection pool ([`replay::MemcachePool`]) that
-//! reproduces the source service's `SockIOPool.NEW_COMPAT_HASH` routing, so
-//! a replay proxy can lane-match recorded memcached exchanges.
-//!
-//! ## Application API — [`Memcache`] and [`CacheService`]
+//! ## Application API — [`Memcache`], [`CacheService`], and direct access
 //!
 //! Application code should depend on the small [`Memcache`] contract.
 //! [`CacheService`] builds the Java-compatible master/slave/L1 topology from
 //! a [`CacheServiceFactory`], while [`SidecarMemcache`] reaches an exact
-//! group/namespace through the local breeze sidecar. Both keep pools and
-//! topology implementation types out of the application boundary.
+//! group/namespace through the local breeze sidecar. [`DirectMemcache`]
+//! connects to one explicit endpoint for tests and validation. All three keep
+//! pools and topology implementation types out of the application boundary.
 //!
 //! ## Unified low-level proxy — [`Client`]
 //!
@@ -91,11 +84,9 @@ pub mod service;
 pub mod sidecar;
 pub mod value;
 
-#[cfg(feature = "direct-tcp")]
-pub mod replay;
-
 mod api;
 mod connection;
+mod direct_memcache;
 mod maintenance;
 mod pool;
 mod protocol;
@@ -109,6 +100,7 @@ pub use api::{
 pub use cacheservice::{CacheNamespaceConf, CacheServiceConfig, CacheServiceError};
 pub use client::Client;
 pub use config::{Config, Endpoint, Protocol};
+pub use direct_memcache::DirectMemcache;
 pub use error::{Error, Result};
 pub use expiration::Expiration;
 pub use sidecar_memcache::SidecarMemcache;

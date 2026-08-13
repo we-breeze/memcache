@@ -2,7 +2,7 @@
 name = "memcache"
 version = "0.1.0"
 edition = "2024"
-description = "High-performance, high-availability async memcached client for the example breeze platform (sidecar / direct / replay modes, text + binary protocols)"
+description = "High-performance, high-availability async memcached client for the example breeze platform (sidecar / direct modes, text + binary protocols)"
 license = "MIT"
 
 [dependencies]
@@ -13,7 +13,6 @@ thiserror = "2"
 tracing = "0.1"
 arc-swap = "1.9.2"
 socket2 = { version = "0.6.5", features = ["all"] }
-memchr = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 md5 = "0.7"
@@ -24,8 +23,6 @@ futures-util = "0.3.34"
 brz-discovery = { workspace = true }
 
 [features]
-direct-tcp = ["memchr"]
-memchr = ["dep:memchr"]
 # Cache-service templates: `Cacheable`, `ShardedCache`, `MemCacheTemplate`,
 # `MemcacheServiceTemplate`, and the Vintage backup integration, under
 # `memcache::service` (a Rust port of the Java commons-memcache templates).
@@ -41,12 +38,11 @@ tracing-subscriber = "0.3"
 # other member.
 [workspace]
 members = ["tools/mc-bench"]
-exclude = ["crates/discovery"]
 resolver = "2"
 
 [workspace.dependencies]
-# External Breeze submodule, kept outside this repository's Cargo workspace.
-brz-discovery = { package = "discovery", path = "crates/discovery" }
+# Shared Breeze checkout managed by the consuming repository.
+brz-discovery = { package = "discovery", path = "../discovery" }
 # Shared with the redis SDK: the bench harness installs this allocator at
 # its binary composition root to get mimalloc + per-request allocation
 # accounting. The SDK itself stays allocator-agnostic.
