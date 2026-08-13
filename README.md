@@ -21,8 +21,53 @@ modes**:
   integration for building and hot-swapping the backup.
 
 Both wire protocols (text and binary) are implemented; binary is the
-default, matching the mesh `PingPongMemcachedBinaryClient`. The public API
-mirrors breeze-sdk-core's `CacheAble` interface (`MeshMemcacheTemplate`).
+default, matching the mesh `PingPongMemcachedBinaryClient`. The low-level
+clients retain the broader breeze-sdk-core operation surface, while the
+application API intentionally starts with only `get` and `set`.
+
+## Application API
+
+Application code can depend only on the root `Memcache` trait. With the
+`service` feature, the SDK-provided `VintageCacheServiceFactory` owns the
+Vintage lookup, YAML parsing, namespace selection, and topology construction:
+
+```rust
+use bytes::Bytes;
+use memcache::{CacheService, Memcache, VintageCacheServiceFactory};
+
+# async fn demo(vintage_client: vintage::Client) -> memcache::Result<()> {
+let factory = VintageCacheServiceFactory::new(
+    vintage_client,
+    "cache.service.feedcontent.pool.yf",
+    "example-abtest",
+);
+let cache = CacheService::new(factory).await?;
+
+cache.set("user:42", Bytes::from_static(b"value")).await?;
+let entry = cache.get("user:42").await?;
+# Ok(())
+# }
+```
+
+The factory is loaded once during construction. This version does not update
+an existing `CacheService` when the Vintage configuration changes.
+
+For a resource exposed directly by the local breeze sidecar, use the same
+application contract without a factory:
+
+```rust
+use bytes::Bytes;
+use memcache::{Memcache, SidecarMemcache};
+
+# async fn demo() -> memcache::Result<()> {
+let cache = SidecarMemcache::new(
+    "cache.service.friendship.pool.yf",
+    "relation_cluster_exposure",
+)?;
+cache.set("user:42", Bytes::from_static(b"value")).await?;
+# Ok(())
+# }
+```
 
 ## Mesh mode (sidecar)
 
@@ -72,15 +117,18 @@ let client = SidecarClient::from_config(cfg)?;
 ### Discovery and endpoint rediscovery
 
 The mesh advertises each resource as a registry file under
-`/tmp/breeze/socks/` (`sidecar::DEFAULT_SOCKS_DIR`):
+`/data1/breeze/socks/` (`sidecar::DEFAULT_SOCKS_DIR`):
 
 ```text
 config.example.com+3+config+v1+<group>+all:<namespace>@mc:<port>@cs
 ```
 
 The SDK parses this name **directly** — no remote/vintage fetch. A numeric
-port means TCP `127.0.0.1:<port>`; otherwise a sibling `<token>.sock` unix
-socket. `SidecarClient::from_sock(path)` parses one specific registry file.
+port means TCP `<host>:<port>`; `host` comes from a non-blank
+`MESH_CONNECT_HOST`, falling back to `127.0.0.1`. This matches breeze's
+traffic-e2e interception convention and accepts hostnames such as
+`breeze.recording`. Non-numeric slots and Unix sockets are unsupported.
+`SidecarClient::from_sock(path)` parses one specific registry file.
 
 Mesh ports are normally fixed per service, but occasionally reassigned. The
 client follows registry changes: new connections dial the new endpoint and

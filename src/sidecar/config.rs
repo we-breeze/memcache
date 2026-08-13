@@ -2,8 +2,9 @@
 //!
 //! The client talks to a single local mesh agent that proxies to the real
 //! memcached backends. Connection is by resource **namespace**: the mesh
-//! exposes a per-namespace endpoint (a unix socket or a `127.0.0.1` port)
-//! discovered from the sock-file directory (see [`super::discovery`]).
+//! exposes a per-namespace TCP port discovered from the sock-file directory
+//! (see [`super::discovery`]). Hosts honor `MESH_CONNECT_HOST` and otherwise
+//! use `127.0.0.1`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,7 +15,7 @@ use crate::error::{Error, Result};
 use super::discovery::{self, MeshDiscovery};
 
 /// Default directory the mesh sidecar writes socks registry files to.
-pub const DEFAULT_SOCKS_DIR: &str = "/tmp/breeze/socks";
+pub use brz_discovery::DEFAULT_SOCKS_DIR;
 
 /// How to reach and pool a mesh-proxied memcached resource.
 #[derive(Clone, Debug)]
@@ -152,16 +153,18 @@ impl MeshConfig {
         let name = name
             .to_str()
             .ok_or_else(|| Error::MeshDiscovery("sock file name is not UTF-8".into()))?;
-        let endpoint = discovery::endpoint_from_name(dir, name)?;
-        let namespace = discovery::namespace_from_name(name).unwrap_or(&self.namespace);
-        let group = discovery::group_from_name(name).map(str::to_string);
-        let config = Config::new(endpoint).with_namespace(namespace);
+        let (endpoint, key) = discovery::endpoint_from_name(dir, name)?;
+        let (namespace, group) = match key {
+            Some(key) => (key.namespace, key.group),
+            None => (self.namespace.clone(), None),
+        };
+        let config = Config::new(endpoint).with_namespace(&namespace);
         Ok(self.apply(
             config,
             MeshDiscovery {
                 dir: dir.to_path_buf(),
                 group,
-                namespace: namespace.to_string(),
+                namespace,
             },
         ))
     }

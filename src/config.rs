@@ -1,5 +1,6 @@
-use std::path::PathBuf;
 use std::time::Duration;
+
+pub use brz_discovery::Endpoint;
 
 use crate::sidecar::discovery::MeshDiscovery;
 
@@ -11,15 +12,6 @@ pub enum Protocol {
     /// Binary protocol (`com.schooner.MemCached` compatible).
     #[default]
     Binary,
-}
-
-/// The single endpoint the client connects to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Endpoint {
-    /// A TCP `host:port` endpoint.
-    Tcp { host: String, port: u16 },
-    /// A unix domain socket path.
-    Unix { path: PathBuf },
 }
 
 /// Client configuration.
@@ -57,7 +49,7 @@ pub struct Config {
     /// disables prewarming and maintenance. Capped at
     /// [`Config::max_connections`].
     pub min_connections: usize,
-    /// Enable TCP keepalive on pooled connections (no-op for unix sockets).
+    /// Enable TCP keepalive on pooled connections.
     /// Probes begin after [`Config::keepalive_interval`] of idleness, so
     /// half-open connections to a crashed mesh are reaped by the kernel
     /// instead of failing a request later.
@@ -86,15 +78,10 @@ pub const MAX_KEY_LEN: usize = 250;
 impl Config {
     /// Build a config for a TCP endpoint with sensible defaults.
     pub fn tcp(host: impl Into<String>, port: u16) -> Self {
-        Self::new(Endpoint::Tcp {
+        Self::new(Endpoint {
             host: host.into(),
             port,
         })
-    }
-
-    /// Build a config for a unix domain socket with sensible defaults.
-    pub fn unix(path: impl Into<PathBuf>) -> Self {
-        Self::new(Endpoint::Unix { path: path.into() })
     }
 
     /// Build a config from an [`Endpoint`] with default pool/timeout settings.

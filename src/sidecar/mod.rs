@@ -25,3 +25,4 @@ pub(crate) mod scanner;
 
 pub use client::SidecarClient;
 pub use config::{DEFAULT_SOCKS_DIR, MeshConfig};
+pub use discovery::MESH_CONNECT_HOST_ENV;

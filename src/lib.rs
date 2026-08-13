@@ -56,7 +56,15 @@
 //! reproduces the source service's `SockIOPool.NEW_COMPAT_HASH` routing, so
 //! a replay proxy can lane-match recorded memcached exchanges.
 //!
-//! ## Unified proxy — [`Client`]
+//! ## Application API — [`Memcache`] and [`CacheService`]
+//!
+//! Application code should depend on the small [`Memcache`] contract.
+//! [`CacheService`] builds the Java-compatible master/slave/L1 topology from
+//! a [`CacheServiceFactory`], while [`SidecarMemcache`] reaches an exact
+//! group/namespace through the local breeze sidecar. Both keep pools and
+//! topology implementation types out of the application boundary.
+//!
+//! ## Unified low-level proxy — [`Client`]
 //!
 //! [`Client`] is a mode-agnostic enum over the sidecar and direct clients,
 //! exposing the whole memcached operation surface regardless of which access
@@ -67,7 +75,7 @@
 //! - **Protocol core** ([`value`], [`expiration`], [`error`])
 //!   — the text and binary wire codecs and the [`Value`]/flags model.
 //! - **Connection & pool** (`connection`, `pool`, `maintenance`) — pooled
-//!   TCP/unix connections with opaque-based request/response correlation, a
+//!   TCP connections with opaque-based request/response correlation, a
 //!   shared minimum-connection maintainer, and TCP keepalive.
 
 pub mod cacheservice;
@@ -76,6 +84,8 @@ pub mod config;
 pub mod direct;
 pub mod error;
 pub mod expiration;
+#[cfg(not(feature = "service"))]
+mod service;
 #[cfg(feature = "service")]
 pub mod service;
 pub mod sidecar;
@@ -84,17 +94,24 @@ pub mod value;
 #[cfg(feature = "direct-tcp")]
 pub mod replay;
 
+mod api;
 mod connection;
 mod maintenance;
 mod pool;
 mod protocol;
+mod sidecar_memcache;
+#[cfg(feature = "service")]
+mod vintage_factory;
 
+pub use api::{
+    CacheEntry, CacheService, CacheServiceFactory, CacheServiceOptions, Memcache, SetOptions,
+};
+pub use cacheservice::{CacheNamespaceConf, CacheServiceConfig, CacheServiceError};
 pub use client::Client;
 pub use config::{Config, Endpoint, Protocol};
 pub use error::{Error, Result};
 pub use expiration::Expiration;
+pub use sidecar_memcache::SidecarMemcache;
 pub use value::{CasValue, ToMemcacheValue, Value, flags};
-
-// Backwards-compatible root re-exports for the replay mode.
-#[cfg(feature = "direct-tcp")]
-pub use replay::{MemcacheError, MemcacheGet, MemcachePool, new_compat_hash, text_get};
+#[cfg(feature = "service")]
+pub use vintage_factory::{VintageCacheServiceFactory, VintageCacheServiceFactoryError};

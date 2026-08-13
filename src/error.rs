@@ -7,6 +7,15 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// A Vintage-backed cache-service factory could not load its configuration.
+    #[cfg(feature = "service")]
+    #[error(transparent)]
+    VintageCacheServiceFactory(#[from] crate::VintageCacheServiceFactoryError),
+
+    /// The cache-service YAML or selected namespace was invalid.
+    #[error(transparent)]
+    CacheServiceConfig(#[from] crate::cacheservice::CacheServiceError),
+
     /// Failed to establish the underlying connection.
     #[error("connect failed: {0}")]
     Connect(#[source] io::Error),

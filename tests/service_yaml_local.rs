@@ -1,14 +1,13 @@
 #![cfg(feature = "service")]
 
-//! Local (no-Docker) integration tests: the committed test YAML
+//! Docker-backed integration tests: the committed test YAML
 //! `fixtures/cache_service_local.yaml` drives the **production service
 //! path** — `CacheServiceConfig` parses the document,
 //! `MemCacheTemplate::from_namespace_conf` builds the multi-tier template —
-//! against four plain memcached instances on 127.0.0.1:21311-21314.
+//! against four memcached containers on 127.0.0.1:21311-21314.
 //!
-//! Instances already listening are reused as-is; otherwise the test starts
-//! them and removes them on completion (mirroring
-//! `tools/mc-bench/bench_local.sh`'s `service-yaml` layout).
+//! The containers use host networking because the fixture contains fixed
+//! loopback ports. They are owned by this test and removed on completion.
 
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -19,6 +18,7 @@ use memcache::service::{Cacheable, MemCacheTemplate, PoolOptions};
 use memcache::value::{ToMemcacheValue, Value};
 
 const YAML: &str = include_str!("fixtures/cache_service_local.yaml");
+const MEMCACHED_IMAGE: &str = "registry.example.com/example_rd_if/memcached:1.6";
 
 /// master / master_l1 / slave / slave_l1 (matches the fixture).
 const PORTS: [u16; 4] = [21311, 21312, 21313, 21314];
@@ -27,22 +27,34 @@ const MASTER_L1: u16 = 21312;
 const SLAVE: u16 = 21313;
 const SLAVE_L1: u16 = 21314;
 
-/// Ensures all four memcached instances are up; instances started here are
-/// killed on drop.
-struct LocalMemcached {
-    started: Vec<u16>,
+/// Four test-owned memcached containers. Successfully started containers are
+/// removed on drop, including while unwinding after a later startup failure.
+struct MemcachedContainers {
+    names: Vec<String>,
 }
 
-impl LocalMemcached {
-    fn ensure() -> Self {
-        let mut started = Vec::new();
+impl MemcachedContainers {
+    fn start() -> Self {
+        let mut containers = Self { names: Vec::new() };
         for port in PORTS {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                continue;
-            }
-            let pid = format!("/tmp/mc-svc-yaml-test-{port}.pid");
-            let status = Command::new("memcached")
+            assert!(
+                std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+                "service_yaml_local requires exclusive access to 127.0.0.1:{port}"
+            );
+
+            let name = format!("brz-mc-service-yaml-{}-{port}", std::process::id());
+            let output = Command::new("docker")
                 .args([
+                    "run",
+                    "--rm",
+                    "--detach",
+                    "--name",
+                    &name,
+                    "--network",
+                    "host",
+                    "--label",
+                    "breeze.memcache.test=service_yaml_local",
+                    MEMCACHED_IMAGE,
                     "-p",
                     &port.to_string(),
                     "-l",
@@ -50,34 +62,37 @@ impl LocalMemcached {
                     "-U",
                     "0",
                     "-m",
-                    "1024",
-                    "-d",
-                    "-P",
-                    &pid,
+                    "64",
                 ])
-                .status()
-                .expect("failed to start memcached");
-            assert!(status.success(), "memcached -p {port} failed to start");
-            started.push(port);
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        for port in PORTS {
+                .output()
+                .unwrap_or_else(|err| panic!("failed to invoke `docker run`: {err}"));
+            assert!(
+                output.status.success(),
+                "docker failed to start {MEMCACHED_IMAGE} on port {port}: stdout={:?} stderr={:?}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            containers.names.push(name);
+
+            let deadline = Instant::now() + Duration::from_secs(10);
             while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
-                assert!(Instant::now() < deadline, "memcached on {port} not ready");
+                assert!(
+                    Instant::now() < deadline,
+                    "memcached container on port {port} was not ready within 10 seconds"
+                );
                 std::thread::sleep(Duration::from_millis(50));
             }
         }
-        LocalMemcached { started }
+        containers
     }
 }
 
-impl Drop for LocalMemcached {
+impl Drop for MemcachedContainers {
     fn drop(&mut self) {
-        for port in &self.started {
-            if let Ok(pid) = std::fs::read_to_string(format!("/tmp/mc-svc-yaml-test-{port}.pid")) {
-                let _ = Command::new("kill").arg(pid.trim()).status();
-            }
-            let _ = std::fs::remove_file(format!("/tmp/mc-svc-yaml-test-{port}.pid"));
+        for name in &self.names {
+            let _ = Command::new("docker")
+                .args(["rm", "--force", name])
+                .output();
         }
     }
 }
@@ -112,7 +127,7 @@ fn value(s: &str) -> Value {
 /// shared, and per-test start/stop would race under parallel test threads.
 #[tokio::test]
 async fn service_yaml_local_suite() {
-    let _mc = LocalMemcached::ensure();
+    let _memcached = MemcachedContainers::start();
     fans_out_writes().await;
     cascades_reads_and_sets_back().await;
     shards_masters().await;

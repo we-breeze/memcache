@@ -114,7 +114,7 @@ impl ServerConfig {
 
     /// Build the low-level engine [`Config`] (no mesh discovery).
     pub(crate) fn resolve(&self) -> Config {
-        let mut config = Config::new(Endpoint::Tcp {
+        let mut config = Config::new(Endpoint {
             host: self.host.clone(),
             port: self.port,
         })
