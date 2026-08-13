@@ -6,8 +6,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use memcache::sidecar::{MeshConfig, SidecarClient};
-use memcache::{CasValue, Client, Config, Endpoint, Protocol};
+use memcache::{
+    CacheServiceOptions, CasValue, Client, Config, Endpoint, Expiration, Memcache, Protocol,
+    SetOptions, SidecarMemcache,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -494,6 +498,55 @@ async fn binary_protocol_crud() {
     run_crud_suite(Protocol::Binary).await;
 }
 
+#[tokio::test]
+async fn sidecar_memcache_implements_application_contract() {
+    let port = spawn(Protocol::Binary).await;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(format!(
+            "config.example.com+3+config+v1+grp+all:ns@mc:{port}@cs"
+        )),
+        [],
+    )
+    .unwrap();
+    let config = MeshConfig::new("ns")
+        .with_group("grp")
+        .with_socket_dir(dir.path())
+        .with_min_connections(0)
+        .with_max_connections(2);
+    let cache = SidecarMemcache::from_mesh_config(
+        config,
+        CacheServiceOptions::new(Expiration::Seconds(90)),
+    )
+    .unwrap();
+
+    assert!(
+        cache
+            .set("plain", Bytes::from_static(b"value"))
+            .await
+            .unwrap()
+    );
+    let plain = cache.get("plain").await.unwrap().unwrap();
+    assert_eq!(plain.data, Bytes::from_static(b"value"));
+    assert_eq!(plain.flags, None);
+
+    assert!(
+        cache
+            .set_with(
+                "tagged",
+                Bytes::from_static(b"tagged-value"),
+                SetOptions::default()
+                    .with_expiration(Expiration::Seconds(5))
+                    .with_flags(32),
+            )
+            .await
+            .unwrap()
+    );
+    let tagged = cache.get("tagged").await.unwrap().unwrap();
+    assert_eq!(tagged.data, Bytes::from_static(b"tagged-value"));
+    assert_eq!(tagged.flags, Some(32));
+}
+
 /// HA mode: writes go to the master tier; reads fall back down
 /// `slave_l1 → slave → master`. With double-write off, a key written
 /// through the HA client exists only on the master; with it on, the slave
@@ -810,7 +863,7 @@ async fn mesh_rediscovery_follows_port_change() {
     .unwrap();
     assert_eq!(
         client.current_endpoint(),
-        Endpoint::Tcp {
+        Endpoint {
             host: "127.0.0.1".into(),
             port: port_a
         }
@@ -827,7 +880,7 @@ async fn mesh_rediscovery_follows_port_change() {
     assert!(client.refresh_endpoint().unwrap());
     assert_eq!(
         client.current_endpoint(),
-        Endpoint::Tcp {
+        Endpoint {
             host: "127.0.0.1".into(),
             port: port_b
         }

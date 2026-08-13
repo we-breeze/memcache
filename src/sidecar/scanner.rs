@@ -55,16 +55,14 @@ impl DirectoryWatcher {
     /// The current endpoint for `group`/`namespace`, if advertised.
     pub(crate) fn lookup(&self, group: Option<&str>, namespace: &str) -> Option<Endpoint> {
         let map = self.snapshot.load();
-        // Prefer an exact group match; fall back to any group serving this
-        // namespace (mirrors `discover_matching` with `group = None`).
+        // A configured group is an exact service coordinate: never cross to
+        // another group that happens to expose the same namespace.
         if let Some(group) = group {
             let key = SockKey {
                 group: Some(group.to_string()),
                 namespace: namespace.to_string(),
             };
-            if let Some(endpoint) = map.get(&key) {
-                return Some(endpoint.clone());
-            }
+            return map.get(&key).cloned();
         }
         map.iter()
             .find(|(key, _)| key.namespace == namespace)
@@ -190,7 +188,7 @@ mod tests {
         watcher.rescan();
         assert_eq!(
             watcher.lookup(Some("g"), "ns"),
-            Some(Endpoint::Tcp {
+            Some(Endpoint {
                 host: "127.0.0.1".into(),
                 port: 9461
             })
@@ -205,7 +203,7 @@ mod tests {
                     group: Some("a".into()),
                     namespace: "ns".into(),
                 },
-                Endpoint::Tcp {
+                Endpoint {
                     host: "127.0.0.1".into(),
                     port: 1,
                 },
@@ -215,7 +213,7 @@ mod tests {
                     group: Some("b".into()),
                     namespace: "ns".into(),
                 },
-                Endpoint::Tcp {
+                Endpoint {
                     host: "127.0.0.1".into(),
                     port: 2,
                 },
@@ -228,13 +226,13 @@ mod tests {
         };
         assert_eq!(
             watcher.lookup(Some("b"), "ns"),
-            Some(Endpoint::Tcp {
+            Some(Endpoint {
                 host: "127.0.0.1".into(),
                 port: 2
             })
         );
-        // Unknown group falls back to any entry for the namespace.
-        assert!(watcher.lookup(Some("zzz"), "ns").is_some());
+        // An explicitly requested group must not cross to a different group.
+        assert!(watcher.lookup(Some("zzz"), "ns").is_none());
         assert!(watcher.lookup(None, "ns").is_some());
         assert!(watcher.lookup(None, "missing").is_none());
     }

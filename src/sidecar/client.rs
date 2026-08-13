@@ -35,7 +35,7 @@ pub struct SidecarClient {
     endpoint: SharedEndpoint,
     /// Subscription to the shared registry scanner for the socks directory
     /// this client's endpoint was discovered in. `None` for clients built
-    /// from an explicit TCP/unix endpoint. Keeping it alive keeps the
+    /// from an explicit TCP endpoint. Keeping it alive keeps the
     /// (shared, per-directory) scan task running.
     watcher: Option<Arc<DirectoryWatcher>>,
     /// Registration with the global pool maintainer, which keeps the pool
@@ -60,14 +60,7 @@ impl SidecarClient {
     /// Connect by directly parsing a mesh socks registry file name (see
     /// `MeshConfig` sock parsing).
     pub fn from_sock(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let name = path
-            .as_ref()
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let namespace = crate::sidecar::discovery::namespace_from_name(&name).unwrap_or("");
-        Self::new(super::config::MeshConfig::new(namespace).resolve_sock(path)?)
+        Self::new(super::config::MeshConfig::new("").resolve_sock(path)?)
     }
 
     /// Build a client and its connection pool from `config`.

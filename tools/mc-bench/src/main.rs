@@ -126,7 +126,7 @@ struct Args {
     group: String,
 
     /// Directory the mesh publishes sock files into.
-    #[arg(long, default_value = "/tmp/breeze/socks")]
+    #[arg(long, default_value = "/data1/breeze/socks")]
     socket_dir: String,
 
     /// Wire protocol (binary or text).
@@ -460,9 +460,7 @@ async fn inject_faults(args: &mut Args, injector: Arc<FaultInjector>) -> Result<
             &ns,
         )
         .map_err(|e| e.to_string())?;
-        let memcache::Endpoint::Tcp { host, port } = endpoint else {
-            return Err("no TCP mesh endpoint to proxy (unix endpoints unsupported)".into());
-        };
+        let memcache::Endpoint { host, port } = endpoint;
         let target = resolve(&format!("{host}:{port}")).await?;
         let proxy = fault::start_proxy(target, injector).await?;
         let dir = std::env::temp_dir().join(format!("mc-bench-fault-{}", std::process::id()));

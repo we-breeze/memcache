@@ -1,11 +1,8 @@
 use std::collections::HashMap;
-use std::io;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
-use tokio::net::{TcpStream, UnixStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::timeout;
 
 use crate::config::{Config, Endpoint, Protocol};
@@ -14,53 +11,6 @@ use crate::expiration::Expiration;
 use crate::protocol::{StoreCommand, binary, text};
 use crate::value::{CasValue, Value};
 
-/// A TCP or unix-domain stream. Both implement [`AsyncRead`]/[`AsyncWrite`];
-/// this enum erases the concrete type without a trait-object allocation.
-enum Stream {
-    Tcp(TcpStream),
-    Unix(UnixStream),
-}
-
-impl AsyncRead for Stream {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
-            Stream::Unix(stream) => Pin::new(stream).poll_read(cx, buf),
-        }
-    }
-}
-
-impl AsyncWrite for Stream {
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        match self.get_mut() {
-            Stream::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
-            Stream::Unix(stream) => Pin::new(stream).poll_write(cx, buf),
-        }
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(stream) => Pin::new(stream).poll_flush(cx),
-            Stream::Unix(stream) => Pin::new(stream).poll_flush(cx),
-        }
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        match self.get_mut() {
-            Stream::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
-            Stream::Unix(stream) => Pin::new(stream).poll_shutdown(cx),
-        }
-    }
-}
-
 /// A single pooled connection to the memcached endpoint.
 ///
 /// Owns a reusable read buffer and knows which wire protocol to speak. The
@@ -68,7 +18,7 @@ impl AsyncWrite for Stream {
 /// primitives ([`Connection::send`], [`Connection::read_line`],
 /// [`Connection::read_exact`]).
 pub(crate) struct Connection {
-    stream: Stream,
+    stream: TcpStream,
     protocol: Protocol,
     read_buf: BytesMut,
     /// Opaque counter for binary-protocol requests, incremented per request so
@@ -86,30 +36,17 @@ impl Connection {
     /// (the currently discovered mesh endpoint, which may differ from the one
     /// in `config` after a rediscovery).
     pub(crate) async fn connect(config: &Config, endpoint: &Endpoint) -> Result<Self> {
-        let stream = match endpoint {
-            Endpoint::Tcp { host, port } => {
-                let connect = TcpStream::connect((host.as_str(), *port));
-                let stream = timeout(config.connect_timeout, connect)
-                    .await
-                    .map_err(|_| Error::Timeout)?
-                    .map_err(Error::Connect)?;
-                if config.tcp_nodelay {
-                    let _ = stream.set_nodelay(true);
-                }
-                if config.tcp_keepalive {
-                    apply_keepalive(&stream, config);
-                }
-                Stream::Tcp(stream)
-            }
-            Endpoint::Unix { path } => {
-                let connect = UnixStream::connect(path);
-                let stream = timeout(config.connect_timeout, connect)
-                    .await
-                    .map_err(|_| Error::Timeout)?
-                    .map_err(Error::Connect)?;
-                Stream::Unix(stream)
-            }
-        };
+        let connect = TcpStream::connect((endpoint.host.as_str(), endpoint.port));
+        let stream = timeout(config.connect_timeout, connect)
+            .await
+            .map_err(|_| Error::Timeout)?
+            .map_err(Error::Connect)?;
+        if config.tcp_nodelay {
+            let _ = stream.set_nodelay(true);
+        }
+        if config.tcp_keepalive {
+            apply_keepalive(&stream, config);
+        }
         Ok(Connection {
             stream,
             protocol: config.protocol,

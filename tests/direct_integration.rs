@@ -18,7 +18,7 @@
 // `--network host` and pass `-p <port> -l 127.0.0.1` as memcached arguments so
 // each container binds a unique loopback port directly on the host.
 
-use memcache::{MemcacheError, MemcachePool, new_compat_hash, text_get};
+use memcache::replay::{MemcacheError, MemcachePool, new_compat_hash, text_get};
 use std::process::Command;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, Instant};
@@ -281,7 +281,7 @@ async fn text_get_large_value_round_trips() {
 
 // ---------------------------------------------------------------------------
 // Non-ignored pure-logic tests. The pool already has unit tests in src; these
-// cover the re-exported `MemcachePool` and `new_compat_hash` symbols from the
+// cover `replay::MemcachePool` and `replay::new_compat_hash` from the
 // integration-test perspective and are cheap to keep.
 // ---------------------------------------------------------------------------
 

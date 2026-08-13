@@ -8,9 +8,7 @@
 //! returns a YAML document whose top-level keys are cache namespaces; each
 //! namespace block carries a `master:` list of `host:port` endpoints (plus
 //! `slave_l1:`, `hash:`, `distribution:`, ...). This module parses that YAML
-//! and exposes the master list, so the direct-TCP [`crate::MemcachePool`] can
-//! be built from the discovered endpoints via
-//! [`crate::MemcachePool::from_masters`].
+//! and exposes the selected namespace to [`crate::CacheServiceFactory`].
 //!
 //! This module only parses YAML strings — it does not talk to Vintage. The
 //! caller obtains the YAML value (the `key="all"` entry of the

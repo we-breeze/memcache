@@ -164,6 +164,12 @@ impl MemCacheTemplate {
         Ok(builder.build())
     }
 
+    /// Overrides the write and read-repair expiration used by this topology.
+    pub(crate) fn with_default_expiration(mut self, expiration: Expiration) -> Self {
+        self.expire = expiration;
+        self
+    }
+
     /// The default expiration for writes issued through the inherent
     /// methods (the Java `expireTime`).
     pub fn expire(&self) -> Expiration {

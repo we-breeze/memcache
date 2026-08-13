@@ -17,7 +17,7 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```ignore
 //! use memcache::service::MemcacheServiceTemplate;
 //! use memcache::sidecar::SidecarClient;
 //!
@@ -35,10 +35,13 @@
 //! # }
 //! ```
 
+#![cfg_attr(not(feature = "service"), allow(dead_code, unused_imports))]
+
 mod cacheable;
 mod memcache_template;
 mod sharded;
 mod template;
+#[cfg(feature = "service")]
 pub mod vintage;
 
 pub use cacheable::Cacheable;
@@ -49,6 +52,7 @@ pub use template::{
     MemcacheServiceTemplateBuilder, global_switch, set_global_switch, set_sync_multi_get_switch,
     sync_multi_get_switch,
 };
+#[cfg(feature = "service")]
 pub use vintage::{
     VintageSourceError, backup_from_vintage, backup_from_vintage_with, spawn_config_watcher,
 };

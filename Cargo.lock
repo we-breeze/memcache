@@ -270,6 +270,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "discovery"
+version = "0.1.0"
+
+[[package]]
 name = "displaydoc"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -769,6 +773,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "deadpool",
+ "discovery",
  "futures-util",
  "md5",
  "memchr",
