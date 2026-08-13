@@ -12,6 +12,11 @@ const REQUEST_MAGIC: u8 = 0x80;
 const RESPONSE_MAGIC: u8 = 0x81;
 const HEADER_LEN: usize = 24;
 
+/// Bodies at least this large are read into a dedicated allocation instead
+/// of the connection's shared read buffer (4 KiB), so a live `Value` never
+/// pins the connection buffer and big reads are single-shot.
+const OWNED_BODY_THRESHOLD: usize = 4096;
+
 /// Binary protocol opcodes.
 pub(crate) mod opcode {
     pub const GET: u8 = 0x00;
@@ -162,7 +167,13 @@ async fn read_response(conn: &mut Connection) -> Result<Response> {
             "binary response extras/key exceed body length".into(),
         ));
     }
-    let body = conn.read_exact(body_len).await?;
+    // Large bodies get their own right-sized allocation (see read_owned);
+    // small frames stay on the shared read buffer.
+    let body = if body_len >= OWNED_BODY_THRESHOLD {
+        conn.read_owned(body_len).await?
+    } else {
+        conn.read_exact(body_len).await?
+    };
     let extras = body.slice(0..extras_len);
     // The key is parsed out of the body but not needed: GETKQ responses are
     // correlated to their requests by opaque token.

@@ -96,6 +96,26 @@ impl Connection {
         Ok(self.read_buf.split_to(n).freeze())
     }
 
+    /// Read exactly `n` bytes into a **dedicated** buffer (returned as the
+    /// value's own storage). Unlike [`Connection::read_exact`], which splits
+    /// from the shared read buffer, this gives large bodies their own
+    /// right-sized allocation: the connection's read buffer stays small for
+    /// headers, and a live `Value` never pins a large shared buffer.
+    pub(crate) async fn read_owned(&mut self, n: usize) -> Result<Bytes> {
+        let mut buf = BytesMut::with_capacity(n);
+        // Move any bytes already buffered (usually none beyond the header).
+        let take = self.read_buf.len().min(n);
+        buf.extend_from_slice(&self.read_buf.split_to(take));
+        while buf.len() < n {
+            if self.stream.read_buf(&mut buf).await? == 0 {
+                return Err(Error::Protocol(
+                    "connection closed with an incomplete frame".into(),
+                ));
+            }
+        }
+        Ok(buf.freeze())
+    }
+
     /// Read a single CRLF-terminated line, returning it *without* the CRLF.
     pub(crate) async fn read_line(&mut self) -> Result<Bytes> {
         let mut searched = 0;

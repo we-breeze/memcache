@@ -312,13 +312,16 @@ async fn run(mut args: Args) -> i32 {
     // Pre-generate the key/value pool once: workers index into it with a
     // plain integer, so the hot path has no `format!()` allocations — the
     // per-op allocation count then reflects the SDK alone.
-    let pool = Arc::new(driver::Pool::new(
-        args.keys,
-        args.key_len,
-        args.val_size,
-        args.big_value_rate,
-        args.big_value_size,
-    ));
+    let pool = Arc::new(
+        driver::Pool::new(
+            args.keys,
+            args.key_len,
+            args.val_size,
+            args.big_value_rate,
+            args.big_value_size,
+        )
+        .with_seeded(),
+    );
     eprintln!(
         "mc-bench: workload={workload:?} keys={} key_len={} val_size={} concurrency={} min_conns={} max_conns={}",
         args.keys, args.key_len, args.val_size, args.concurrency, args.min_conns, args.max_conns
@@ -626,7 +629,7 @@ async fn seed_keys(
                 // `driver::seeded_value`).
                 let value = match workload {
                     WorkloadKind::Incr => b"0".to_vec(),
-                    _ => driver::seeded_value(key.as_bytes(), pool.value(i)),
+                    _ => pool.seeded(i).to_vec(),
                 };
                 // Tolerate transient faults (fault injection may hang a
                 // connection).

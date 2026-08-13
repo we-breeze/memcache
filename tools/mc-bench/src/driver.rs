@@ -187,6 +187,9 @@ pub trait Workload: Send + Sync {
 pub struct Pool {
     keys: Vec<String>,
     values: Vec<Vec<u8>>,
+    /// Fully seeded values (`key || padding`), one per key; pre-built so
+    /// the SET hot path does not allocate in the harness.
+    seeded: Vec<Vec<u8>>,
     /// Big-value pattern and stride: every `big_stride`-th key gets the big
     /// value; stride 0 = disabled.
     big_value: Option<Vec<u8>>,
@@ -224,7 +227,21 @@ impl Pool {
             values,
             big_value,
             big_stride,
+            seeded: Vec::new(),
         }
+    }
+
+    /// Pre-build the per-key seeded values (call once after construction).
+    pub fn with_seeded(mut self) -> Self {
+        self.seeded = (0..self.keys.len())
+            .map(|i| seeded_value(self.keys[i].as_bytes(), self.value(i)))
+            .collect();
+        self
+    }
+
+    /// The pre-built seeded value for key `index` (requires `with_seeded`).
+    pub fn seeded(&self, index: usize) -> &[u8] {
+        &self.seeded[index % self.seeded.len()]
     }
 
     /// All pre-generated keys, for seeding.
@@ -337,8 +354,8 @@ impl Workload for SetPing {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         let index = op as usize;
         let key = self.pool.key(index);
-        let value = seeded_value(key.as_bytes(), self.pool.value(index));
-        Box::pin(async move { client.set(key, &value).await.unwrap_or(false) })
+        let value = self.pool.seeded(index);
+        Box::pin(async move { client.set(key, value).await.unwrap_or(false) })
     }
 }
 
