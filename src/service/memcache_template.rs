@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use crate::cacheservice::CacheNamespaceConf;
 use crate::direct::ServerConfig;
 use crate::value::{CasValue, Value};
-use crate::{Error, Expiration, Result};
+use crate::{Error, Expiration, Protocol, Result};
 use async_trait::async_trait;
 use tracing::warn;
 
@@ -65,10 +65,21 @@ pub struct PoolOptions {
     pub min_connections: Option<usize>,
     /// Maximum pooled connections per backend.
     pub max_connections: Option<usize>,
+    /// Wire protocol used by every backend in the topology (binary by
+    /// default for callers that construct [`MemCacheTemplate`] directly).
+    pub protocol: Protocol,
 }
 
 impl PoolOptions {
+    /// Selects the wire protocol for every backend in the topology.
+    #[must_use]
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
+    }
+
     fn apply(self, mut config: ServerConfig) -> ServerConfig {
+        config = config.with_protocol(self.protocol);
         if let Some(n) = self.min_connections {
             config = config.with_min_connections(n);
         }
