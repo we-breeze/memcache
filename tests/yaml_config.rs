@@ -74,7 +74,8 @@ fn fixture_pools_match_expected_shape() {
     let conf = CacheServiceConfig::from_yaml_str(yaml_from_snapshot(FIXTURE)).unwrap();
 
     let full = conf.namespace("attitude.specVector").unwrap();
-    assert_eq!(full.hash(), Some("crc32"));
+    // mc 的 crc32 在解析期改写为 crc32-short（与 mesh 路由一致）。
+    assert_eq!(full.hash(), Some("crc32-short"));
     assert_eq!(full.distribution(), Some("modula"));
     assert_eq!(full.masters().len(), 2);
     assert_eq!(full.slaves().len(), 2);
