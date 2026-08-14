@@ -15,7 +15,7 @@
 //! - [`MeshConfig`] — namespace/group/socket-dir/protocol/pool/timeout
 //!   settings.
 //!
-//! For direct backend access (no mesh), see [`crate::direct`].
+//! Direct backend access is exposed only by the `direct-mock` feature.
 
 pub mod client;
 pub mod config;

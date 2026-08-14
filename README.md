@@ -7,9 +7,10 @@ modes**:
 - **Mesh mode** ([`sidecar`]) — talk to the local breeze mesh agent,
   discovered from the sock registry files it publishes; the mesh proxies to
   the real backends and owns sharding and failover. (The *byMesh* path.)
-- **Direct backend mode** ([`direct`]) — connect to memcached backends
-  directly, with client-side shard routing using the same hash/distribution
-  algorithms as the mesh. (The *byTcp* path.)
+- **Direct backend mode** (`direct-mock` feature) — exposes direct-backend
+  types only for tests, validation tools, and benchmarks. The same
+  implementation stays internal for cache-service templates. (The *byTcp*
+  path.)
 - **Cache-service templates** ([`service`], feature `service`) — a Rust port
   of the Java `commons-memcache` templates: `MemcacheServiceTemplate`
   (primary cache-service client with backup fallback) and `MemCacheTemplate`
@@ -135,12 +136,13 @@ namespaces costs one timer and one directory read, not one per namespace.
 `SidecarClient::refresh_endpoint()` forces a rescan on demand and
 `SidecarClient::current_endpoint()` reports the endpoint in use.
 
-## Direct backend mode
+## Direct backend mode (`direct-mock`)
 
-No mesh: the SDK connects to the backends directly and routes keys itself.
-`Shards` uses the same hash/distribution algorithms as the breeze mesh
-(`direct::sharding`, ported from `breeze/sharding`), so a key maps to the
-same backend whether routed by this client or by the mesh:
+This public API is disabled by default. Enable `direct-mock` for tests,
+validation tools, or benchmarks that need to construct direct clients. With
+the feature enabled, `Shards` uses the same hash/distribution algorithms as
+the breeze mesh (`direct::sharding`, ported from `breeze/sharding`), so a key
+maps to the same backend whether routed by this client or by the mesh:
 
 ```rust
 use memcache::direct::{DirectClient, ServerConfig, Shards};
@@ -165,8 +167,8 @@ shards.get_client("u:42").set("u:42", "data", 60u32).await?;
 
 ## Unified proxy
 
-`memcache::Client` is an enum over the sidecar and direct clients, exposing
-the whole operation surface regardless of access mode:
+`memcache::Client` wraps the sidecar client by default. Its direct variant and
+`as_direct` accessor are available only with `direct-mock`:
 
 ```rust
 use memcache::Client;

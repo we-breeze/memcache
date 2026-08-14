@@ -1,12 +1,11 @@
 //! The mode-agnostic [`Client`] — a unified proxy over the access modes.
 //!
-//! `Client` is an enum over [`crate::sidecar::SidecarClient`] (mesh access)
-//! and [`crate::direct::DirectClient`] (direct backend access), exposing the
-//! whole memcached operation surface on either — useful for code paths that
-//! serve resources of mixed modes.
+//! `Client` wraps [`crate::sidecar::SidecarClient`] by default. With the
+//! `direct-mock` feature it also wraps `direct::DirectClient`.
 
 use std::collections::HashMap;
 
+#[cfg(feature = "direct-mock")]
 use crate::direct::DirectClient;
 use crate::error::Result;
 use crate::expiration::Expiration;
@@ -18,7 +17,8 @@ use crate::value::{CasValue, ToMemcacheValue, Value};
 pub enum Client {
     /// Mesh access mode (see [`crate::sidecar`]).
     Sidecar(SidecarClient),
-    /// Direct backend access mode (see [`crate::direct`]).
+    /// Direct backend access mode.
+    #[cfg(feature = "direct-mock")]
     Direct(DirectClient),
 }
 
@@ -27,11 +27,13 @@ impl Client {
     pub fn as_sidecar(&self) -> Option<&SidecarClient> {
         match self {
             Client::Sidecar(client) => Some(client),
+            #[cfg(feature = "direct-mock")]
             Client::Direct(_) => None,
         }
     }
 
     /// The wrapped direct client, if in direct mode.
+    #[cfg(feature = "direct-mock")]
     pub fn as_direct(&self) -> Option<&DirectClient> {
         match self {
             Client::Direct(client) => Some(client),
@@ -43,6 +45,7 @@ impl Client {
     pub async fn get(&self, key: &str) -> Result<Option<Value>> {
         match self {
             Client::Sidecar(client) => client.get(key).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.get(key).await,
         }
     }
@@ -51,6 +54,7 @@ impl Client {
     pub async fn get_multi(&self, keys: &[&str]) -> Result<HashMap<String, Value>> {
         match self {
             Client::Sidecar(client) => client.get_multi(keys).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.get_multi(keys).await,
         }
     }
@@ -59,6 +63,7 @@ impl Client {
     pub async fn get_cas(&self, key: &str) -> Result<Option<CasValue>> {
         match self {
             Client::Sidecar(client) => client.get_cas(key).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.get_cas(key).await,
         }
     }
@@ -72,6 +77,7 @@ impl Client {
     ) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.set(key, value, expire).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.set(key, value, expire).await,
         }
     }
@@ -85,6 +91,7 @@ impl Client {
     ) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.add(key, value, expire).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.add(key, value, expire).await,
         }
     }
@@ -98,6 +105,7 @@ impl Client {
     ) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.replace(key, value, expire).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.replace(key, value, expire).await,
         }
     }
@@ -106,6 +114,7 @@ impl Client {
     pub async fn append(&self, key: &str, value: impl ToMemcacheValue) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.append(key, value).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.append(key, value).await,
         }
     }
@@ -114,6 +123,7 @@ impl Client {
     pub async fn prepend(&self, key: &str, value: impl ToMemcacheValue) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.prepend(key, value).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.prepend(key, value).await,
         }
     }
@@ -127,6 +137,7 @@ impl Client {
     ) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.cas(key, value, expire).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.cas(key, value, expire).await,
         }
     }
@@ -135,6 +146,7 @@ impl Client {
     pub async fn delete(&self, key: &str) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.delete(key).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.delete(key).await,
         }
     }
@@ -143,6 +155,7 @@ impl Client {
     pub async fn incr(&self, key: &str, delta: u64) -> Result<Option<u64>> {
         match self {
             Client::Sidecar(client) => client.incr(key, delta).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.incr(key, delta).await,
         }
     }
@@ -151,6 +164,7 @@ impl Client {
     pub async fn decr(&self, key: &str, delta: u64) -> Result<Option<u64>> {
         match self {
             Client::Sidecar(client) => client.decr(key, delta).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.decr(key, delta).await,
         }
     }
@@ -159,6 +173,7 @@ impl Client {
     pub async fn touch(&self, key: &str, expire: impl Into<Expiration>) -> Result<bool> {
         match self {
             Client::Sidecar(client) => client.touch(key, expire).await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.touch(key, expire).await,
         }
     }
@@ -167,6 +182,7 @@ impl Client {
     pub async fn flush_all(&self) -> Result<()> {
         match self {
             Client::Sidecar(client) => client.flush_all().await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.flush_all().await,
         }
     }
@@ -175,6 +191,7 @@ impl Client {
     pub async fn version(&self) -> Result<String> {
         match self {
             Client::Sidecar(client) => client.version().await,
+            #[cfg(feature = "direct-mock")]
             Client::Direct(client) => client.version().await,
         }
     }
@@ -186,6 +203,7 @@ impl From<SidecarClient> for Client {
     }
 }
 
+#[cfg(feature = "direct-mock")]
 impl From<DirectClient> for Client {
     fn from(client: DirectClient) -> Self {
         Client::Direct(client)

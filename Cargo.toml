@@ -23,6 +23,10 @@ futures-util = "0.3.34"
 brz-discovery = { workspace = true }
 
 [features]
+default = []
+# Expose direct-backend types for tests, mocks, validation, and benchmarks.
+# Direct internals remain compiled for CacheService and service templates.
+direct-mock = []
 # Cache-service templates: `Cacheable`, `ShardedCache`, `MemCacheTemplate`,
 # `MemcacheServiceTemplate`, and the Vintage backup integration, under
 # `memcache::service` (a Rust port of the Java commons-memcache templates).

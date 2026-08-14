@@ -1,4 +1,4 @@
-#![cfg(feature = "service")]
+#![cfg(all(feature = "service", feature = "direct-mock"))]
 
 //! YAML-driven end-to-end integration tests against real memcached
 //! containers, modeled on the `../redis` and `../memcache` harnesses.
