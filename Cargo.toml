@@ -21,6 +21,7 @@ async-trait = "0.1"
 vintage = { path = "../vintage", optional = true }
 futures-util = "0.3.34"
 brz-discovery = { workspace = true }
+enum_dispatch = "0.3.8"
 
 [features]
 default = []

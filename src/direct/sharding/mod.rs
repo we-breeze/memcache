@@ -1,21 +1,30 @@
 //! Hash and distribution algorithms for client-side backend sharding.
 //!
-//! Faithful port of the breeze mesh's `sharding` crate
-//! (`github.com/examplecom/breeze`, `sharding/src/{hash,distribution}`), so an
-//! SDK accessing backends directly computes **the same shard index as the
-//! mesh** for a given `(hash, distribution)` configuration. Keys are plain
-//! `&[u8]`; logging goes through `tracing`; `enum_dispatch` is replaced by
-//! plain enum dispatch.
+//! Vendored 1:1 from the breeze mesh's `sharding` crate
+//! (`rust/breeze/sharding/src/{hash,distribution}`), so an SDK accessing
+//! backends directly computes **the same shard index as the mesh** for a
+//! given `(hash, distribution)` configuration. The only deviations from the
+//! upstream sources: `log::` calls are mapped to `tracing::`, and the
+//! `ds::RingSlice` `HashKey` impl (mesh-internal) is omitted.
 //!
 //! Names come from the resource configuration, e.g. hash `crc32-underscore`,
 //! distribution `modula`, `absmodula`, `ketama`, `range-256`, `modrange`,
 //! `slotmod-1024`, `splitmod-32`, `secmod`.
 
+// Vendored upstream sources keep their original style: they are excluded
+// from this repository's clippy/rustfmt gates so future re-syncs stay
+// diff-minimal.
+#[allow(clippy::all)]
+#[rustfmt::skip]
 pub mod distribution;
+#[allow(clippy::all)]
+#[rustfmt::skip]
 pub mod hash;
 
 pub use distribution::Distribute;
 pub use hash::Hasher;
+
+use hash::Hash;
 
 /// A resolved client-side sharding plan: hash algorithm + slot distribution.
 #[derive(Clone, Debug)]
@@ -37,12 +46,12 @@ impl Sharding {
     /// The shard index for `key`.
     #[inline]
     pub fn shard_idx(&self, key: &[u8]) -> usize {
-        self.distribute.index(self.hasher.hash(key))
+        self.distribute.index(self.hasher.hash(&key))
     }
 
-    /// The raw hash of `key` (e.g. for `hash_range` membership checks).
+    /// The raw hash of `key`.
     #[inline]
     pub fn hash(&self, key: &[u8]) -> i64 {
-        self.hasher.hash(key)
+        self.hasher.hash(&key)
     }
 }
