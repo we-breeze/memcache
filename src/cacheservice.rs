@@ -47,8 +47,8 @@ impl CacheServiceConfig {
         let mut config: Self =
             serde_yaml::from_str(yaml).map_err(|e| CacheServiceError::Yaml(e.to_string()))?;
         for conf in config.0.values_mut() {
-            if conf.hash.as_deref() == Some(crate::direct::sharding::HASH_CRC32) {
-                conf.hash = Some(crate::direct::sharding::HASH_CRC32_SHORT.to_string());
+            if let Some(hash) = conf.hash.take() {
+                conf.hash = Some(crate::direct::sharding::normalize_hash_name(&hash).to_string());
             }
         }
         Ok(config)

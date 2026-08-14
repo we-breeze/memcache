@@ -36,6 +36,18 @@ pub const HASH_CRC32_SHORT: &str = "crc32-short";
 /// The default distribution (modulo over the backend list).
 pub const DIST_MODULA: &str = "modula";
 
+/// Normalize a configured hash name: for memcached, plain [`HASH_CRC32`]
+/// means [`HASH_CRC32_SHORT`] — the mesh routes with the short variant
+/// (matching the breeze endpoint's cacheservice conversion). Any other
+/// name passes through unchanged.
+pub fn normalize_hash_name(name: &str) -> &str {
+    if name.eq_ignore_ascii_case(HASH_CRC32) {
+        HASH_CRC32_SHORT
+    } else {
+        name
+    }
+}
+
 /// A resolved client-side sharding plan: hash algorithm + slot distribution.
 #[derive(Clone, Debug)]
 pub struct Sharding {
@@ -51,13 +63,8 @@ impl Sharding {
     /// name is rewritten to `crc32-short`: for memcached the two are the
     /// same algorithm and the mesh routes with the short variant.
     pub fn new(hash_alg: &str, distribution: &str, backends: &[String]) -> Self {
-        let hash_alg = if hash_alg.eq_ignore_ascii_case(HASH_CRC32) {
-            HASH_CRC32_SHORT
-        } else {
-            hash_alg
-        };
         Sharding {
-            hasher: Hasher::from(hash_alg),
+            hasher: Hasher::from(normalize_hash_name(hash_alg)),
             distribute: Distribute::from(distribution, backends),
         }
     }
