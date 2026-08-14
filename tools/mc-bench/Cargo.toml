@@ -20,7 +20,7 @@ memory-stats = ["brz-mem/heap-stats"]
 template = ["memcache/service"]
 
 [dependencies]
-memcache = { path = "../.." }
+memcache = { path = "../..", features = ["direct-mock"] }
 brz-mem.workspace = true
 tokio = { version = "1", features = ["full"] }
 bytes = "1"

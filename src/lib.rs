@@ -23,14 +23,14 @@
 //! # }
 //! ```
 //!
-//! ## Direct backend mode — [`direct`]
+//! ## Direct backend mode (`direct-mock` feature)
 //!
-//! The SDK connects to memcached backends directly (no mesh), with
-//! client-side shard routing ([`direct::Shards`], the `shardingSupport`
-//! pattern) using the same hash/distribution algorithms as the mesh
-//! ([`direct::sharding`]).
+//! Direct-backend types are public only when `direct-mock` is enabled. Their
+//! implementation remains available internally to [`CacheService`] and the
+//! service templates. The feature exposes `direct::DirectClient` and related
+//! sharding/topology types for tests, validation tools, and benchmarks.
 //!
-//! ```no_run
+//! ```ignore
 //! use memcache::direct::{DirectClient, ServerConfig, Shards};
 //!
 //! # async fn demo() -> memcache::Result<()> {
@@ -53,15 +53,14 @@
 //! Application code should depend on the small [`Memcache`] contract.
 //! [`CacheService`] builds the Java-compatible master/slave/L1 topology from
 //! a [`CacheServiceFactory`], while [`SidecarMemcache`] reaches an exact
-//! group/namespace through the local breeze sidecar. [`DirectMemcache`]
-//! connects to one explicit endpoint for tests and validation. All three keep
-//! pools and topology implementation types out of the application boundary.
+//! group/namespace through the local breeze sidecar. `DirectMemcache` is
+//! available only with the `direct-mock` feature. These facades keep pools and
+//! topology implementation types out of the application boundary.
 //!
 //! ## Unified low-level proxy — [`Client`]
 //!
-//! [`Client`] is a mode-agnostic enum over the sidecar and direct clients,
-//! exposing the whole memcached operation surface regardless of which access
-//! mode a resource uses.
+//! [`Client`] wraps the sidecar client by default and additionally exposes its
+//! direct variant when `direct-mock` is enabled.
 //!
 //! ## Shared layers (both pooled modes)
 //!
@@ -74,7 +73,12 @@
 pub mod cacheservice;
 pub mod client;
 pub mod config;
+#[cfg(feature = "direct-mock")]
 pub mod direct;
+#[cfg(not(feature = "direct-mock"))]
+#[allow(dead_code, unused_imports)]
+#[doc(hidden)]
+mod direct;
 pub mod error;
 pub mod expiration;
 #[cfg(not(feature = "service"))]
@@ -86,6 +90,7 @@ pub mod value;
 
 mod api;
 mod connection;
+#[cfg(feature = "direct-mock")]
 mod direct_memcache;
 mod maintenance;
 mod pool;
@@ -100,6 +105,7 @@ pub use api::{
 pub use cacheservice::{CacheNamespaceConf, CacheServiceConfig, CacheServiceError};
 pub use client::Client;
 pub use config::{Config, Endpoint, Protocol};
+#[cfg(feature = "direct-mock")]
 pub use direct_memcache::DirectMemcache;
 pub use error::{Error, Result};
 pub use expiration::Expiration;

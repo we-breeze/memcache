@@ -7,10 +7,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
+#[cfg(feature = "direct-mock")]
+use memcache::Client;
 use memcache::sidecar::{MeshConfig, SidecarClient};
 use memcache::{
-    CacheServiceOptions, CasValue, Client, Config, Endpoint, Expiration, Memcache, Protocol,
-    SetOptions, SidecarMemcache,
+    CacheServiceOptions, CasValue, Config, Endpoint, Expiration, Memcache, Protocol, SetOptions,
+    SidecarMemcache,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpListener;
@@ -552,6 +554,7 @@ async fn sidecar_memcache_implements_application_contract() {
 /// through the HA client exists only on the master; with it on, the slave
 /// tier is written too.
 #[tokio::test]
+#[cfg(feature = "direct-mock")]
 async fn ha_client_read_fallback_and_double_write() {
     use memcache::direct::{DirectClient, HaClient, HaConfig, ServerConfig};
 
@@ -618,6 +621,7 @@ async fn ha_client_read_fallback_and_double_write() {
 /// and `Shards` routes keys to a stable backend via the mesh's hash +
 /// distribution algorithms. The unified `Client` enum works over both modes.
 #[tokio::test]
+#[cfg(feature = "direct-mock")]
 async fn direct_mode_and_shards() {
     use memcache::direct::{DirectClient, ServerConfig, Shards};
 

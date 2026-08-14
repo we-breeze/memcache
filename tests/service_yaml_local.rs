@@ -1,4 +1,4 @@
-#![cfg(feature = "service")]
+#![cfg(all(feature = "service", feature = "direct-mock"))]
 
 //! Integration tests: the committed test YAML
 //! `fixtures/cache_service_local.yaml` drives the **production service

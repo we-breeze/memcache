@@ -23,7 +23,7 @@ pub enum Protocol {
 /// This is the low-level, single-endpoint engine configuration shared by
 /// both access modes; applications usually build one via
 /// [`crate::sidecar::MeshConfig`] (mesh discovery) or
-/// [`crate::direct::ServerConfig`] (direct backend).
+/// the direct backend configuration exposed by the `direct-mock` feature.
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Endpoint to connect to.
