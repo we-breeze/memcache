@@ -8,7 +8,7 @@ use bytes::Bytes;
 use crate::cacheservice::CacheNamespaceConf;
 use crate::service::{Cacheable, MemCacheTemplate as Topology, PoolOptions};
 use crate::value::Value;
-use crate::{Expiration, Result};
+use crate::{Expiration, Protocol, Result};
 
 /// A value returned by [`Memcache::get`].
 ///
@@ -84,16 +84,40 @@ pub trait CacheServiceFactory: Send + Sync {
 }
 
 /// Instance-level settings for [`CacheService`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CacheServiceOptions {
     /// Expiration used when [`SetOptions::expiration`] is `None`.
     pub default_expiration: Expiration,
+    /// Wire protocol used by the direct topology built by [`CacheService`].
+    ///
+    /// This does not override the protocol of an explicitly supplied sidecar
+    /// [`crate::sidecar::MeshConfig`].
+    pub protocol: Protocol,
+}
+
+impl Default for CacheServiceOptions {
+    fn default() -> Self {
+        Self {
+            default_expiration: Expiration::default(),
+            protocol: Protocol::Text,
+        }
+    }
 }
 
 impl CacheServiceOptions {
     /// Creates options with an explicit default expiration.
     pub fn new(default_expiration: Expiration) -> Self {
-        Self { default_expiration }
+        Self {
+            default_expiration,
+            ..Self::default()
+        }
+    }
+
+    /// Selects the wire protocol for the direct cache-service topology.
+    #[must_use]
+    pub fn with_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self
     }
 }
 
@@ -120,7 +144,8 @@ impl CacheService {
         options: CacheServiceOptions,
     ) -> Result<Self> {
         let namespace = factory.load().await?;
-        let topology = Topology::from_namespace_conf(&namespace, PoolOptions::default())?
+        let pool_options = PoolOptions::default().with_protocol(options.protocol);
+        let topology = Topology::from_namespace_conf(&namespace, pool_options)?
             .with_default_expiration(options.default_expiration);
         Ok(Self::from_backend(Arc::new(topology), options))
     }
@@ -156,6 +181,18 @@ mod tests {
     use crate::value::CasValue;
 
     use super::*;
+
+    #[test]
+    fn cache_service_options_default_to_text_protocol() {
+        assert_eq!(CacheServiceOptions::default().protocol, Protocol::Text);
+    }
+
+    #[test]
+    fn cache_service_options_can_select_binary_protocol() {
+        let options = CacheServiceOptions::default().with_protocol(Protocol::Binary);
+
+        assert_eq!(options.protocol, Protocol::Binary);
+    }
 
     #[derive(Default)]
     struct RecordingBackend {

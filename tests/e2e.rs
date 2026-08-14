@@ -11,7 +11,8 @@ use bytes::Bytes;
 use memcache::Client;
 use memcache::sidecar::{MeshConfig, SidecarClient};
 use memcache::{
-    CacheServiceOptions, CasValue, Config, Endpoint, Expiration, Memcache, Protocol, SetOptions,
+    CacheNamespaceConf, CacheService, CacheServiceConfig, CacheServiceFactory, CacheServiceOptions,
+    CasValue, Config, Endpoint, Expiration, Memcache, Protocol, Result, SetOptions,
     SidecarMemcache,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -26,6 +27,21 @@ struct Item {
 }
 
 type Store = Arc<Mutex<HashMap<String, Item>>>;
+
+struct StaticCacheServiceFactory(CacheNamespaceConf);
+
+#[async_trait::async_trait]
+impl CacheServiceFactory for StaticCacheServiceFactory {
+    async fn load(&self) -> Result<CacheNamespaceConf> {
+        Ok(self.0.clone())
+    }
+}
+
+fn cache_service_factory(port: u16) -> StaticCacheServiceFactory {
+    let yaml = format!("test:\n  master:\n  - 127.0.0.1:{port}\n");
+    let config = CacheServiceConfig::from_yaml_str(&yaml).unwrap();
+    StaticCacheServiceFactory(config.namespace("test").unwrap().clone())
+}
 
 /// Spawn a fake server speaking `protocol`; returns the bound port.
 async fn spawn(protocol: Protocol) -> u16 {
@@ -498,6 +514,45 @@ async fn prewarms_min_connections() {
 #[tokio::test]
 async fn binary_protocol_crud() {
     run_crud_suite(Protocol::Binary).await;
+}
+
+#[tokio::test]
+async fn cache_service_uses_text_protocol_by_default() {
+    let port = spawn(Protocol::Text).await;
+    let cache = CacheService::new(cache_service_factory(port))
+        .await
+        .unwrap();
+
+    assert!(
+        cache
+            .set("default-text", Bytes::from_static(b"value"))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        cache.get("default-text").await.unwrap().unwrap().data,
+        Bytes::from_static(b"value")
+    );
+}
+
+#[tokio::test]
+async fn cache_service_options_can_select_binary_protocol() {
+    let port = spawn(Protocol::Binary).await;
+    let options = CacheServiceOptions::default().with_protocol(Protocol::Binary);
+    let cache = CacheService::with_options(cache_service_factory(port), options)
+        .await
+        .unwrap();
+
+    assert!(
+        cache
+            .set("explicit-binary", Bytes::from_static(b"value"))
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        cache.get("explicit-binary").await.unwrap().unwrap().data,
+        Bytes::from_static(b"value")
+    );
 }
 
 #[tokio::test]
