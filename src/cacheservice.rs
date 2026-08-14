@@ -160,7 +160,9 @@ mod tests {
     fn parses_cache_service_yaml_namespace() {
         let cfg = CacheServiceConfig::from_yaml_str(SAMPLE_YAML).unwrap();
         let ns = cfg.namespace("example-abtest").unwrap();
-        assert_eq!(ns.hash(), Some("crc32"));
+        // For memcached, `crc32` is rewritten to `crc32-short` at parse
+        // time (matching the breeze endpoint's conversion).
+        assert_eq!(ns.hash(), Some("crc32-short"));
         assert_eq!(ns.distribution(), Some("modula"));
         assert_eq!(
             ns.masters(),
