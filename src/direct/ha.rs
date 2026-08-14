@@ -54,8 +54,8 @@ impl HaConfig {
             masters,
             slave_l1: Vec::new(),
             slaves: Vec::new(),
-            hash: "crc32".to_string(),
-            distribution: "modula".to_string(),
+            hash: super::sharding::HASH_CRC32.to_string(),
+            distribution: super::sharding::DIST_MODULA.to_string(),
             write_slave: false,
             server: ServerConfig::new("127.0.0.1:11211").expect("default address"),
         }

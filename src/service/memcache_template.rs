@@ -124,8 +124,10 @@ impl MemCacheTemplate {
     /// sharded pool per master / slave endpoint list and per L1 group,
     /// routed with the namespace's hash/distribution.
     pub fn from_namespace_conf(conf: &CacheNamespaceConf, options: PoolOptions) -> Result<Self> {
-        let hash = conf.hash().unwrap_or("crc32");
-        let distribution = conf.distribution().unwrap_or("modula");
+        let hash = conf.hash().unwrap_or(crate::direct::sharding::HASH_CRC32);
+        let distribution = conf
+            .distribution()
+            .unwrap_or(crate::direct::sharding::DIST_MODULA);
         let pool = |servers: &[String]| -> Result<Pool> {
             let mut clients = Vec::with_capacity(servers.len());
             for server in servers {

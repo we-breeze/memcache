@@ -47,8 +47,8 @@ impl CacheServiceConfig {
         let mut config: Self =
             serde_yaml::from_str(yaml).map_err(|e| CacheServiceError::Yaml(e.to_string()))?;
         for conf in config.0.values_mut() {
-            if conf.hash.as_deref() == Some("crc32") {
-                conf.hash = Some("crc32-short".to_string());
+            if conf.hash.as_deref() == Some(crate::direct::sharding::HASH_CRC32) {
+                conf.hash = Some(crate::direct::sharding::HASH_CRC32_SHORT.to_string());
             }
         }
         Ok(config)
@@ -162,8 +162,11 @@ mod tests {
         let ns = cfg.namespace("example-abtest").unwrap();
         // For memcached, `crc32` is rewritten to `crc32-short` at parse
         // time (matching the breeze endpoint's conversion).
-        assert_eq!(ns.hash(), Some("crc32-short"));
-        assert_eq!(ns.distribution(), Some("modula"));
+        assert_eq!(ns.hash(), Some(crate::direct::sharding::HASH_CRC32_SHORT));
+        assert_eq!(
+            ns.distribution(),
+            Some(crate::direct::sharding::DIST_MODULA)
+        );
         assert_eq!(
             ns.masters(),
             &[

@@ -46,8 +46,10 @@ impl ShardedCache {
         for server in servers {
             clients.push(DirectClient::connect(ServerConfig::new(server)?)?);
         }
-        let hash = conf.hash().unwrap_or("crc32");
-        let distribution = conf.distribution().unwrap_or("modula");
+        let hash = conf.hash().unwrap_or(crate::direct::sharding::HASH_CRC32);
+        let distribution = conf
+            .distribution()
+            .unwrap_or(crate::direct::sharding::DIST_MODULA);
         Ok(Self::new(Shards::new(
             hash,
             distribution,
