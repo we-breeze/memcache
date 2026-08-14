@@ -38,8 +38,20 @@ pub struct CacheServiceConfig(HashMap<String, CacheNamespaceConf>);
 impl CacheServiceConfig {
     /// Parses a cache-service YAML document (the `key="all"` value from a
     /// Vintage statics-config lookup response).
+    ///
+    /// Like the breeze endpoint's cacheservice config, a namespace hash of
+    /// plain `crc32` is rewritten to `crc32-short`: for memcached the two
+    /// are the same algorithm and the mesh routes with the short variant
+    /// (`(crc32 >> 16) & 0x7fff`), so clients must too.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, CacheServiceError> {
-        serde_yaml::from_str(yaml).map_err(|e| CacheServiceError::Yaml(e.to_string()))
+        let mut config: Self =
+            serde_yaml::from_str(yaml).map_err(|e| CacheServiceError::Yaml(e.to_string()))?;
+        for conf in config.0.values_mut() {
+            if conf.hash.as_deref() == Some("crc32") {
+                conf.hash = Some("crc32-short".to_string());
+            }
+        }
+        Ok(config)
     }
 
     /// Returns the master list for the given namespace, if present.
