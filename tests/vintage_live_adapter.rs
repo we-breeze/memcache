@@ -33,8 +33,8 @@ use axum::{
     routing::get,
 };
 use bytes::Bytes;
-use memcache::service::vintage_live::VintageCacheServices;
-use memcache::{CacheService, Memcache};
+use memcache::service::vintage_live::VintageCacheServiceConfigSource;
+use memcache::{CacheService, CacheServiceOptions, Memcache};
 use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
 use vintage::{Client, ClientConfig, SnapshotConfig};
@@ -200,15 +200,17 @@ async fn subscribe_builds_cache_from_namespace() {
     let body = group_yaml(&mc.endpoint(), &mc.endpoint());
     let (endpoint, _state, server) = spawn_vintage(body).await;
     let client = vintage_client(endpoint);
-    let services = VintageCacheServices::new(client);
+    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
-    let cache: CacheService = services.subscribe("g", "ns-a").await.unwrap();
+    let cache: CacheService =
+        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+            .await
+            .unwrap();
     assert!(cache.set("k", Bytes::from_static(b"v")).await.unwrap());
     let got = cache.get("k").await.unwrap().unwrap();
     assert_eq!(got.data, Bytes::from_static(b"v"));
 
     drop(cache);
-    drop(services);
     server.abort();
     let _ = server.await;
 }
@@ -221,9 +223,12 @@ async fn namespace_change_hot_swaps_backend() {
     let body = group_yaml(&mc1.endpoint(), &mc1.endpoint());
     let (endpoint, state, server) = spawn_vintage(body).await;
     let client = vintage_client(endpoint);
-    let services = VintageCacheServices::new(client);
+    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
-    let cache: CacheService = services.subscribe("g", "ns-a").await.unwrap();
+    let cache: CacheService =
+        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+            .await
+            .unwrap();
     cache.set("k", Bytes::from_static(b"v")).await.unwrap();
     assert_eq!(
         cache.get("k").await.unwrap().unwrap().data,
@@ -245,7 +250,6 @@ async fn namespace_change_hot_swaps_backend() {
     }
 
     drop(cache);
-    drop(services);
     server.abort();
     let _ = server.await;
 }
@@ -257,9 +261,12 @@ async fn namespace_yaml_error_keeps_old_backend() {
     let body = group_yaml(&mc.endpoint(), &mc.endpoint());
     let (endpoint, state, server) = spawn_vintage(body).await;
     let client = vintage_client(endpoint);
-    let services = VintageCacheServices::new(client);
+    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
-    let cache: CacheService = services.subscribe("g", "ns-a").await.unwrap();
+    let cache: CacheService =
+        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+            .await
+            .unwrap();
     cache.set("k", Bytes::from_static(b"v")).await.unwrap();
 
     // Push a malformed ns-a block (invalid YAML for that namespace). The group
@@ -277,7 +284,6 @@ async fn namespace_yaml_error_keeps_old_backend() {
     );
 
     drop(cache);
-    drop(services);
     server.abort();
     let _ = server.await;
 }
@@ -288,20 +294,25 @@ async fn drop_cache_service_evicts_group_poll() {
     let mc = MemcachedContainer::start("evict").await;
     let body = group_yaml(&mc.endpoint(), &mc.endpoint());
     let (endpoint, state, server) = spawn_vintage(body).await;
-    let client = vintage_client(endpoint);
-    let services = VintageCacheServices::new(client);
+    let client = vintage_client(endpoint.clone());
+    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
-    let cache: CacheService = services.subscribe("g", "ns-a").await.unwrap();
+    let cache: CacheService =
+        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+            .await
+            .unwrap();
     drop(cache);
     // Dropping the last CacheService should evict the group's Live, stopping
-    // the poll. The FakeVintage does not count requests, so we only assert the
-    // drop does not panic and a re-subscribe works.
+    // the poll. Re-subscribe (new source) works.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let cache2: CacheService = services.subscribe("g", "ns-a").await.unwrap();
+    let source2 = VintageCacheServiceConfigSource::new(vintage_client(endpoint), "g", "ns-a");
+    let cache2: CacheService =
+        CacheService::new_live(std::sync::Arc::new(source2), CacheServiceOptions::default())
+            .await
+            .unwrap();
     cache2.set("k2", Bytes::from_static(b"v2")).await.unwrap();
 
     drop(cache2);
-    drop(services);
     server.abort();
     let _ = server.await;
     let _ = state;

@@ -1,7 +1,14 @@
 //! [`CacheServiceInner`] — one namespace's hot-swappable backend with a
-//! two-level diff.
+//! two-level semantic diff.
+//!
+//! This is the apply core driven by [`crate::CacheService::new_live`]: a config
+//! source pushes parsed [`CacheNamespaceConf`]s, and the inner rebuilds the
+//! backend only when the parsed config actually changes (the second level of
+//! the two-level diff). The first level (skip when the raw bytes are
+//! unchanged) lives in the Vintage adapter's `CacheServiceGroup`, which slices
+//! the group body per namespace before parsing.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use arc_swap::{ArcSwap, ArcSwapAny};
 
@@ -9,16 +16,10 @@ use crate::api::{BackendSlot, CacheServiceOptions};
 use crate::cacheservice::{CacheNamespaceConf, CacheServiceConfig, CacheServiceError};
 use crate::service::{MemCacheTemplate as Topology, PoolOptions};
 
-/// Errors raised while applying a namespace update.
+/// Errors raised while applying a namespace config update.
 #[derive(Debug, thiserror::Error)]
 pub enum NamespaceApplyError {
-    /// The namespace was deleted from the group; the old backend is retained.
-    #[error("namespace {0:?} missing from updated group")]
-    NamespaceMissing(String),
-    /// The namespace content was not valid UTF-8.
-    #[error("namespace content is not valid UTF-8: {0}")]
-    Utf8(#[from] std::str::Utf8Error),
-    /// The namespace YAML could not be parsed.
+    /// The namespace content could not be parsed.
     #[error(transparent)]
     Config(#[from] CacheServiceError),
     /// The backend topology could not be rebuilt.
@@ -28,17 +29,12 @@ pub enum NamespaceApplyError {
 
 /// One namespace's live backend. Holds the current topology behind an
 /// `ArcSwapAny` shared with its [`crate::CacheService`], plus the last
-/// successfully applied config (for the two-level semantic diff).
+/// successfully applied config (for the semantic diff).
 pub struct CacheServiceInner {
     namespace: Box<str>,
     options: CacheServiceOptions,
     backend: Arc<ArcSwapAny<Arc<BackendSlot>>>,
     applied: ArcSwap<CacheNamespaceConf>,
-    /// Drop hook: lets the group remove this namespace's weak ref promptly when
-    /// the last `CacheService` holding the inner drops. Receives the namespace
-    /// name and a fresh `Weak` to `self` (already dropping); the group matches
-    /// by the strong it stored, so a dead weak simply triggers lazy cleanup.
-    unregister: Mutex<Option<Box<dyn FnOnce() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for CacheServiceInner {
@@ -51,19 +47,20 @@ impl std::fmt::Debug for CacheServiceInner {
 
 impl CacheServiceInner {
     /// Creates a new inner backend. The `backend` `ArcSwapAny` is shared with
-    /// the [`crate::CacheService`] so swaps are visible to it.
+    /// the [`crate::CacheService`] so swaps are visible to it. `initial` is the
+    /// config the first backend was built from (stored as the semantic-diff
+    /// baseline).
     pub(crate) fn new(
-        namespace: Box<str>,
-        conf: CacheNamespaceConf,
+        namespace: impl Into<Box<str>>,
+        initial: CacheNamespaceConf,
         backend: Arc<ArcSwapAny<Arc<BackendSlot>>>,
         options: CacheServiceOptions,
     ) -> Arc<Self> {
         Arc::new(Self {
-            namespace,
+            namespace: namespace.into(),
             options,
             backend,
-            applied: ArcSwap::from_pointee(conf),
-            unregister: Mutex::new(None),
+            applied: ArcSwap::from_pointee(initial),
         })
     }
 
@@ -72,37 +69,25 @@ impl CacheServiceInner {
         &self.namespace
     }
 
-    /// Registers a drop hook so the group can prune this namespace's weak ref
-    /// when the inner is dropped.
-    pub(crate) fn set_unregister<F>(&self, f: F)
-    where
-        F: FnOnce() + Send + Sync + 'static,
-    {
-        *self.unregister.lock().expect("unregister mutex poisoned") = Some(Box::new(f));
+    /// Parses one namespace's YAML slice into a `CacheNamespaceConf`. Used by
+    /// the Vintage adapter's initial load and per-namespace update dispatch.
+    pub fn parse_namespace_yaml(
+        namespace: &str,
+        yaml: &str,
+    ) -> Result<CacheNamespaceConf, CacheServiceError> {
+        CacheServiceConfig::from_yaml_str(yaml)?
+            .namespace(namespace)
+            .cloned()
+            .ok_or_else(|| CacheServiceError::MissingNamespace(namespace.to_string()))
     }
 
-    /// Applies an updated namespace content. Two-level diff:
-    /// 1. (caller-side, at the group level) skip if the namespace bytes are
-    ///    unchanged;
-    /// 2. here: parse the YAML; if the parsed config equals the last applied
-    ///    config, skip the rebuild;
-    /// 3. otherwise build a new topology and atomically swap it in.
-    ///
-    /// On any failure the old backend is retained (failure semantics).
-    pub fn apply(
-        &self,
-        content: Option<vintage::ConfigContent>,
-    ) -> Result<(), NamespaceApplyError> {
-        let content = content
-            .ok_or_else(|| NamespaceApplyError::NamespaceMissing(self.namespace.to_string()))?;
-        let yaml = content.as_str()?;
-        let next = CacheServiceConfig::from_yaml_str(yaml)?
-            .namespace(&self.namespace)
-            .cloned()
-            .ok_or_else(|| NamespaceApplyError::NamespaceMissing(self.namespace.to_string()))?;
-
-        // Level 2: semantic equality → skip rebuild (e.g. only comments/format
-        // changed, or crc32 normalization produced the same config).
+    /// Applies an updated namespace config. Semantic diff: if the parsed config
+    /// equals the last applied config, skip the rebuild (e.g. only
+    /// comments/format changed, or crc32 normalization produced the same
+    /// config). Otherwise build a new topology and atomically swap it in. On
+    /// any failure the old backend is retained (failure semantics).
+    pub fn apply(&self, next: CacheNamespaceConf) -> Result<(), NamespaceApplyError> {
+        // Semantic equality → skip rebuild.
         if **self.applied.load() == next {
             return Ok(());
         }
@@ -115,18 +100,5 @@ impl CacheServiceInner {
             .store(Arc::new(BackendSlot(Arc::new(topology))));
         self.applied.store(Arc::new(next));
         Ok(())
-    }
-}
-
-impl Drop for CacheServiceInner {
-    fn drop(&mut self) {
-        if let Some(unregister) = self
-            .unregister
-            .lock()
-            .expect("unregister mutex poisoned")
-            .take()
-        {
-            unregister();
-        }
     }
 }

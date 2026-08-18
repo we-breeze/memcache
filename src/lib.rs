@@ -51,8 +51,10 @@
 //! ## Application API — [`Memcache`], [`CacheService`], and direct access
 //!
 //! Application code should depend on the small [`Memcache`] contract.
-//! [`CacheService`] builds the Java-compatible master/slave/L1 topology from
-//! a [`CacheServiceFactory`], while [`SidecarMemcache`] reaches an exact
+//! [`CacheService`] builds the Java-compatible master/slave/L1 topology from a
+//! fixed [`CacheNamespaceConf`] (`CacheService::new`) or from a live
+//! [`CacheServiceConfigSource`] that hot-swaps on config change
+//! (`CacheService::new_live`), while [`SidecarMemcache`] reaches an exact
 //! group/namespace through the local breeze sidecar. `DirectMemcache` is
 //! available only with the `direct-mock` feature. These facades keep pools and
 //! topology implementation types out of the application boundary.
@@ -100,7 +102,8 @@ mod sidecar_memcache;
 mod vintage_factory;
 
 pub use api::{
-    CacheEntry, CacheService, CacheServiceFactory, CacheServiceOptions, Memcache, SetOptions,
+    CacheEntry, CacheService, CacheServiceConfigSource, CacheServiceOptions, Memcache, SetOptions,
+    SubscriptionHandle,
 };
 pub use cacheservice::{CacheNamespaceConf, CacheServiceConfig, CacheServiceError};
 pub use client::Client;
@@ -112,4 +115,4 @@ pub use expiration::Expiration;
 pub use sidecar_memcache::SidecarMemcache;
 pub use value::{CasValue, ToMemcacheValue, Value, flags};
 #[cfg(feature = "service")]
-pub use vintage_factory::{VintageCacheServiceFactory, VintageCacheServiceFactoryError};
+pub use vintage_factory::VintageCacheServiceFactory;

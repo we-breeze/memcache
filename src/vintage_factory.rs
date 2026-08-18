@@ -1,16 +1,14 @@
-//! Vintage-backed construction for the application-facing CacheService.
+//! One-shot Vintage-backed loading of a cache-service namespace config.
+//!
+//! This is a thin helper for the static construction path
+//! ([`crate::CacheService::new`]): it performs a single Vintage
+//! `lookup_config` and parses the requested namespace. It does not poll or
+//! update — use [`crate::service::vintage_live::VintageCacheServiceConfigSource`]
+//! with [`crate::CacheService::new_live`] for a hot-swapping cache.
 
-use async_trait::async_trait;
+use crate::{CacheNamespaceConf, CacheServiceConfig, CacheServiceError, Result};
 
-use crate::{
-    CacheNamespaceConf, CacheServiceConfig, CacheServiceError, CacheServiceFactory, Result,
-};
-
-/// Loads one cache-service namespace from Vintage statics config.
-///
-/// This implementation performs a single lookup during
-/// [`crate::CacheService::new`]. It does not poll or update the resulting
-/// cache after construction.
+/// Loads one cache-service namespace from a single Vintage statics-config lookup.
 #[derive(Clone)]
 pub struct VintageCacheServiceFactory {
     client: vintage::Client,
@@ -19,7 +17,7 @@ pub struct VintageCacheServiceFactory {
 }
 
 impl VintageCacheServiceFactory {
-    /// Creates a factory for one statics-config group and cache namespace.
+    /// Creates a loader for one statics-config group and cache namespace.
     pub fn new(
         client: vintage::Client,
         group: impl Into<String>,
@@ -31,51 +29,23 @@ impl VintageCacheServiceFactory {
             namespace: namespace.into(),
         }
     }
-}
 
-/// Errors produced while loading CacheService configuration from Vintage.
-#[derive(Debug, thiserror::Error)]
-pub enum VintageCacheServiceFactoryError {
-    /// The Vintage lookup failed.
-    #[error("vintage lookup failed: {0}")]
-    Vintage(#[from] vintage::Error),
-
-    /// The statics-config response did not contain its conventional `all`
-    /// YAML entry.
-    #[error("vintage statics config for group {group:?} has no \"all\" entry")]
-    MissingAllEntry {
-        /// The requested Vintage statics-config group.
-        group: String,
-    },
-
-    /// The YAML was invalid or did not contain the requested namespace.
-    #[error(transparent)]
-    Config(#[from] CacheServiceError),
-}
-
-#[async_trait]
-impl CacheServiceFactory for VintageCacheServiceFactory {
-    async fn load(&self) -> Result<CacheNamespaceConf> {
+    /// Performs one Vintage lookup and returns the parsed namespace config.
+    pub async fn load(&self) -> Result<CacheNamespaceConf> {
         let snapshot = self
             .client
             .lookup_config(&self.group)
             .await
-            .map_err(VintageCacheServiceFactoryError::from)?;
+            .map_err(|e| crate::Error::Protocol(format!("vintage lookup failed: {e}")))?;
         let yaml = snapshot.all_entry_value().ok_or_else(|| {
-            VintageCacheServiceFactoryError::MissingAllEntry {
-                group: self.group.clone(),
-            }
+            crate::Error::Protocol(format!(
+                "vintage statics config for group {:?} has no \"all\" entry",
+                self.group
+            ))
         })?;
-        let config = CacheServiceConfig::from_yaml_str(yaml)
-            .map_err(VintageCacheServiceFactoryError::from)?;
-        config
-            .namespace(&self.namespace)
-            .cloned()
-            .ok_or_else(|| {
-                VintageCacheServiceFactoryError::Config(CacheServiceError::MissingNamespace(
-                    self.namespace.clone(),
-                ))
-            })
-            .map_err(crate::Error::from)
+        let config = CacheServiceConfig::from_yaml_str(yaml)?;
+        config.namespace(&self.namespace).cloned().ok_or_else(|| {
+            crate::Error::from(CacheServiceError::MissingNamespace(self.namespace.clone()))
+        })
     }
 }
