@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwapAny;
 use async_trait::async_trait;
 use bytes::Bytes;
 
@@ -121,15 +122,29 @@ impl CacheServiceOptions {
     }
 }
 
+/// Sized wrapper so the backend can live in an `ArcSwapAny` (which requires
+/// `Sized` pointees) while callers still see `Arc<dyn Cacheable>`. Mirrors
+/// `service::template::BackupSlot`.
+pub(crate) struct BackendSlot(pub(crate) Arc<dyn Cacheable>);
+
 /// A CacheService-backed [`Memcache`] implementation.
 ///
 /// This is the stable application facade. It delegates topology behavior to
 /// the Java-compatible master/slave/L1 implementation without exposing its
 /// pools, builders, or broader `Cacheable` operation surface.
+///
+/// The backend lives behind an `ArcSwapAny` so it can be hot-swapped at
+/// runtime — the Vintage live-value adapter (`service::vintage_live`) swaps a
+/// rebuilt topology in when the cache-service config changes. The one-shot
+/// construction path (`CacheService::new`) simply installs the first backend
+/// and never swaps.
 #[derive(Clone)]
 pub struct CacheService {
-    backend: Arc<dyn Cacheable>,
+    backend: Arc<ArcSwapAny<Arc<BackendSlot>>>,
     options: CacheServiceOptions,
+    /// Keeps the live-value driver alive for the hot-swap path. `None` for the
+    /// one-shot construction path.
+    _hold: Option<Arc<dyn std::fmt::Debug + Send + Sync>>,
 }
 
 impl CacheService {
@@ -151,14 +166,39 @@ impl CacheService {
     }
 
     fn from_backend(backend: Arc<dyn Cacheable>, options: CacheServiceOptions) -> Self {
-        Self { backend, options }
+        Self {
+            backend: Arc::new(ArcSwapAny::new(Arc::new(BackendSlot(backend)))),
+            options,
+            _hold: None,
+        }
+    }
+
+    /// Loads the current backend as a cheap `Arc` clone.
+    fn backend(&self) -> Arc<dyn Cacheable> {
+        self.backend.load_full().0.clone()
+    }
+
+    /// Builds a `CacheService` whose backend is driven externally by a
+    /// live-value adapter. The `hold` keeps the driver alive for the lifetime
+    /// of this `CacheService`.
+    #[cfg(feature = "service")]
+    pub(crate) fn from_live(
+        backend: Arc<ArcSwapAny<Arc<BackendSlot>>>,
+        options: CacheServiceOptions,
+        hold: Arc<dyn std::fmt::Debug + Send + Sync>,
+    ) -> Self {
+        Self {
+            backend,
+            options,
+            _hold: Some(hold),
+        }
     }
 }
 
 #[async_trait]
 impl Memcache for CacheService {
     async fn get(&self, key: &str) -> Result<Option<CacheEntry>> {
-        self.backend
+        self.backend()
             .get(key)
             .await
             .map(|value| value.map(CacheEntry::from))
@@ -169,7 +209,7 @@ impl Memcache for CacheService {
             .expiration
             .unwrap_or(self.options.default_expiration);
         let value = Value::new(value, options.flags.unwrap_or_default());
-        self.backend.set(key, value, expiration).await
+        self.backend().set(key, value, expiration).await
     }
 }
 

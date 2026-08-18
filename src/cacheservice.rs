@@ -66,7 +66,7 @@ impl CacheServiceConfig {
 }
 
 /// One namespace block within a [`CacheServiceConfig`].
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct CacheNamespaceConf {
     #[serde(default)]
     hash: Option<String>,
