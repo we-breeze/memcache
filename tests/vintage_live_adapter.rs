@@ -36,7 +36,7 @@ use bytes::Bytes;
 use memcache::{CacheService, CacheServiceOptions, Memcache};
 use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
-use vintage::{Client, ClientConfig, SnapshotConfig};
+use vintage::{Client, ClientConfig};
 
 const COMMITTED_IMAGE: &str = "registry.example.com/example_rd_if/memcached:1.6";
 static NEXT_PORT: AtomicU16 = AtomicU16::new(24111);
@@ -177,7 +177,7 @@ async fn spawn_vintage(body: String) -> (String, Arc<FakeVintage>, tokio::task::
 }
 
 fn vintage_client(endpoint: String) -> Client {
-    let config = ClientConfig::new(endpoint, SnapshotConfig::disabled())
+    let config = ClientConfig::new(endpoint)
         .unwrap()
         .with_refresh_interval(Duration::from_millis(20))
         .unwrap();
