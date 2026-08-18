@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwapAny;
 use async_trait::async_trait;
 use bytes::Bytes;
 
@@ -9,7 +10,6 @@ use crate::cacheservice::CacheNamespaceConf;
 use crate::service::{Cacheable, MemCacheTemplate as Topology, PoolOptions};
 use crate::value::Value;
 use crate::{Expiration, Protocol, Result};
-
 /// A value returned by [`Memcache::get`].
 ///
 /// Memcached uses `0` for an untagged value on the wire. The public API maps
@@ -72,15 +72,62 @@ pub trait Memcache: Send + Sync {
     async fn set_with(&self, key: &str, value: Bytes, options: SetOptions) -> Result<bool>;
 }
 
-/// Supplies the parsed YAML namespace used to construct a [`CacheService`].
+/// Supplies a live, possibly-changing namespace configuration. `CacheService`
+/// does **not** poll: the source detects changes and pushes them by invoking
+/// the `on_update` callback registered via [`CacheServiceConfigSource::subscribe`].
 ///
-/// Applications normally use the SDK's `VintageCacheServiceFactory` (feature
-/// `service`). The trait keeps construction testable and permits other
-/// SDK-owned configuration sources.
+/// This trait is feature-independent so `CacheService` can be tested and driven
+/// by any source (in-process fakes, file watchers, Vintage, …) without the
+/// `service` feature. The Vintage adapter (`service::vintage_live`) is one
+/// implementation; `CacheService::from_vintage` is a convenience constructor
+/// for it.
 #[async_trait]
-pub trait CacheServiceFactory: Send + Sync {
-    /// Loads the already-selected cache-service namespace configuration.
+pub trait CacheServiceConfigSource: Send + Sync {
+    /// Loads the initial namespace configuration. Called once at construction.
     async fn load(&self) -> Result<CacheNamespaceConf>;
+
+    /// Subscribes to subsequent changes. The source invokes `on_update`
+    /// whenever the namespace configuration changes; `CacheService` never
+    /// polls. Dropping the returned [`SubscriptionHandle`] cancels the
+    /// subscription (and stops any source-internal polling/listening).
+    async fn subscribe(
+        &self,
+        on_update: Arc<dyn Fn(CacheNamespaceConf) + Send + Sync>,
+    ) -> Result<SubscriptionHandle>;
+}
+
+/// Owns one source subscription. Dropping it cancels the subscription and stops
+/// the source's internal polling/listening for this subscriber.
+pub struct SubscriptionHandle {
+    cancel: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl std::fmt::Debug for SubscriptionHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubscriptionHandle").finish_non_exhaustive()
+    }
+}
+
+impl SubscriptionHandle {
+    /// Creates a handle whose `Drop` runs `cancel`.
+    pub fn new(cancel: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self {
+            cancel: Some(Box::new(cancel)),
+        }
+    }
+
+    /// Creates a no-op handle (for sources that never need cleanup).
+    pub fn empty() -> Self {
+        Self { cancel: None }
+    }
+}
+
+impl Drop for SubscriptionHandle {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            cancel();
+        }
+    }
 }
 
 /// Instance-level settings for [`CacheService`].
@@ -121,44 +168,162 @@ impl CacheServiceOptions {
     }
 }
 
+/// Sized wrapper so the backend can live in an `ArcSwapAny` (which requires
+/// `Sized` pointees) while callers still see `Arc<dyn Cacheable>`. Mirrors
+/// `service::template::BackupSlot`.
+pub(crate) struct BackendSlot(pub(crate) Arc<dyn Cacheable>);
+
 /// A CacheService-backed [`Memcache`] implementation.
 ///
 /// This is the stable application facade. It delegates topology behavior to
 /// the Java-compatible master/slave/L1 implementation without exposing its
 /// pools, builders, or broader `Cacheable` operation surface.
+///
+/// The backend lives behind an `ArcSwapAny` so it can be hot-swapped at
+/// runtime. Construct via [`CacheService::new`] for a fixed (one-shot)
+/// backend, or [`CacheService::new_live`] for a backend that hot-swaps when a
+/// [`CacheServiceConfigSource`] pushes new configuration.
 #[derive(Clone)]
 pub struct CacheService {
-    backend: Arc<dyn Cacheable>,
+    backend: Arc<ArcSwapAny<Arc<BackendSlot>>>,
     options: CacheServiceOptions,
+    /// Keeps the live-value driver (the config source subscription + the
+    /// `CacheServiceInner` doing the two-level diff) alive for the hot-swap
+    /// path. `None` for the one-shot construction path.
+    _hold: Option<Arc<dyn std::fmt::Debug + Send + Sync>>,
 }
 
 impl CacheService {
-    /// Builds a cache with [`CacheServiceOptions::default`].
-    pub async fn new(factory: impl CacheServiceFactory) -> Result<Self> {
-        Self::with_options(factory, CacheServiceOptions::default()).await
+    /// Builds a cache from a fixed (one-shot) namespace configuration. The
+    /// backend never changes — use [`CacheService::new_live`] for a backend
+    /// that hot-swaps on config change.
+    pub async fn new(conf: CacheNamespaceConf, options: CacheServiceOptions) -> Result<Self> {
+        let backend = Self::build_backend(&conf, options)?;
+        Ok(Self {
+            backend: Arc::new(ArcSwapAny::new(Arc::new(BackendSlot(backend)))),
+            options,
+            _hold: None,
+        })
     }
 
-    /// Builds a cache with explicit instance-level options.
-    pub async fn with_options(
-        factory: impl CacheServiceFactory,
+    /// Builds a cache whose backend hot-swaps when `source` pushes new
+    /// configuration. `source` drives the cache — `CacheService` itself never
+    /// polls. The initial configuration is loaded once at construction.
+    ///
+    /// Use this with a custom [`CacheServiceConfigSource`] implementation; for
+    /// the common Vintage case prefer [`CacheService::from_vintage`].
+    #[cfg(feature = "service")]
+    pub async fn new_live(
+        source: Arc<dyn CacheServiceConfigSource>,
         options: CacheServiceOptions,
     ) -> Result<Self> {
-        let namespace = factory.load().await?;
-        let pool_options = PoolOptions::default().with_protocol(options.protocol);
-        let topology = Topology::from_namespace_conf(&namespace, pool_options)?
-            .with_default_expiration(options.default_expiration);
-        Ok(Self::from_backend(Arc::new(topology), options))
+        let initial = source.load().await?;
+        let backend = Self::build_backend(&initial, options)?;
+        let backend_slot = Arc::new(ArcSwapAny::new(Arc::new(BackendSlot(backend))));
+
+        let inner = crate::service::vintage_live::CacheServiceInner::new(
+            /* namespace placeholder */ "",
+            initial,
+            backend_slot.clone(),
+            options,
+        );
+        let inner_for_cb = inner.clone();
+        let on_update: Arc<dyn Fn(CacheNamespaceConf) + Send + Sync> = Arc::new(move |conf| {
+            if let Err(error) = inner_for_cb.apply(conf) {
+                tracing::warn!(
+                    %error,
+                    "cache-service config update failed; retaining old backend"
+                );
+            }
+        });
+        let handle = source.subscribe(on_update).await?;
+
+        // Hold the source, the subscription handle, and the apply inner so the
+        // whole driver stays alive for the lifetime of this CacheService. The
+        // source must be retained explicitly: it may own the group registry
+        // (and thus the polling task) internally — without a strong reference
+        // held here, a source that is only reachable via its `subscribe`-time
+        // `SubscriptionHandle` could be dropped, stopping the poll early.
+        Ok(Self {
+            backend: backend_slot,
+            options,
+            _hold: Some(Arc::new(LiveHold {
+                _source: source,
+                _handle: handle,
+                _inner: inner,
+            })),
+        })
     }
 
-    fn from_backend(backend: Arc<dyn Cacheable>, options: CacheServiceOptions) -> Self {
-        Self { backend, options }
+    /// Builds a cache whose backend hot-swaps when the Vintage statics-config
+    /// `group`/`namespace` changes.
+    ///
+    /// This is the public live-construction entry point. It subscribes to the
+    /// Vintage group (one shared poll per group), and the backend is rebuilt
+    /// and atomically swapped in whenever this namespace's config changes;
+    /// unrelated namespace changes are ignored. `CacheService` itself never
+    /// polls — Vintage pushes updates. The driver is held alive for the
+    /// lifetime of the returned `CacheService`.
+    #[cfg(feature = "service")]
+    pub async fn from_vintage(
+        client: vintage::Client,
+        group: impl Into<String>,
+        namespace: impl Into<String>,
+        options: CacheServiceOptions,
+    ) -> Result<Self> {
+        let source = crate::service::vintage_live::VintageCacheServiceConfigSource::new(
+            client, group, namespace,
+        );
+        Self::new_live(Arc::new(source), options).await
+    }
+
+    fn build_backend(
+        conf: &CacheNamespaceConf,
+        options: CacheServiceOptions,
+    ) -> Result<Arc<dyn Cacheable>> {
+        let pool_options = PoolOptions::default().with_protocol(options.protocol);
+        let topology = Topology::from_namespace_conf(conf, pool_options)?
+            .with_default_expiration(options.default_expiration);
+        Ok(Arc::new(topology))
+    }
+
+    /// Loads the current backend as a cheap `Arc` clone.
+    fn backend(&self) -> Arc<dyn Cacheable> {
+        self.backend.load_full().0.clone()
+    }
+
+    /// Test-only constructor that installs a prebuilt backend directly. Used by
+    /// unit tests that assert get/set delegation without parsing a namespace.
+    #[cfg(test)]
+    pub(crate) fn from_backend(backend: Arc<dyn Cacheable>, options: CacheServiceOptions) -> Self {
+        Self {
+            backend: Arc::new(ArcSwapAny::new(Arc::new(BackendSlot(backend)))),
+            options,
+            _hold: None,
+        }
+    }
+}
+
+/// Keeps a live-value subscription and its applying inner alive while any
+/// `CacheService` clone references them.
+#[cfg(feature = "service")]
+struct LiveHold {
+    _source: Arc<dyn CacheServiceConfigSource>,
+    _handle: SubscriptionHandle,
+    _inner: Arc<crate::service::vintage_live::CacheServiceInner>,
+}
+
+#[cfg(feature = "service")]
+impl std::fmt::Debug for LiveHold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveHold").finish_non_exhaustive()
     }
 }
 
 #[async_trait]
 impl Memcache for CacheService {
     async fn get(&self, key: &str) -> Result<Option<CacheEntry>> {
-        self.backend
+        self.backend()
             .get(key)
             .await
             .map(|value| value.map(CacheEntry::from))
@@ -169,7 +334,7 @@ impl Memcache for CacheService {
             .expiration
             .unwrap_or(self.options.default_expiration);
         let value = Value::new(value, options.flags.unwrap_or_default());
-        self.backend.set(key, value, expiration).await
+        self.backend().set(key, value, expiration).await
     }
 }
 

@@ -8,7 +8,7 @@
 //! returns a YAML document whose top-level keys are cache namespaces; each
 //! namespace block carries a `master:` list of `host:port` endpoints (plus
 //! `slave_l1:`, `hash:`, `distribution:`, ...). This module parses that YAML
-//! and exposes the selected namespace to [`crate::CacheServiceFactory`].
+//! and exposes the selected namespace to `CacheService::new`.
 //!
 //! This module only parses YAML strings — it does not talk to Vintage. The
 //! caller obtains the YAML value (the `key="all"` entry of the
@@ -66,7 +66,7 @@ impl CacheServiceConfig {
 }
 
 /// One namespace block within a [`CacheServiceConfig`].
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct CacheNamespaceConf {
     #[serde(default)]
     hash: Option<String>,
