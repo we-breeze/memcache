@@ -1,7 +1,7 @@
 #![cfg(all(feature = "service", feature = "direct-mock"))]
 
-//! Integration tests for the Vintage live-value cache-service adapter
-//! (`VintageCacheServices`).
+//! Integration tests for `CacheService::from_vintage` — the Vintage live-value
+//! hot-swap path.
 //!
 //! These use an in-process axum fake Vintage server (the same pattern as the
 //! `vintage` crate's `config_watch` tests) plus real memcached containers for
@@ -33,7 +33,6 @@ use axum::{
     routing::get,
 };
 use bytes::Bytes;
-use memcache::service::vintage_live::VintageCacheServiceConfigSource;
 use memcache::{CacheService, CacheServiceOptions, Memcache};
 use serde_json::json;
 use tokio::net::{TcpListener, TcpStream};
@@ -200,10 +199,9 @@ async fn subscribe_builds_cache_from_namespace() {
     let body = group_yaml(&mc.endpoint(), &mc.endpoint());
     let (endpoint, _state, server) = spawn_vintage(body).await;
     let client = vintage_client(endpoint);
-    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
     let cache: CacheService =
-        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+        CacheService::from_vintage(client, "g", "ns-a", CacheServiceOptions::default())
             .await
             .unwrap();
     assert!(cache.set("k", Bytes::from_static(b"v")).await.unwrap());
@@ -223,10 +221,9 @@ async fn namespace_change_hot_swaps_backend() {
     let body = group_yaml(&mc1.endpoint(), &mc1.endpoint());
     let (endpoint, state, server) = spawn_vintage(body).await;
     let client = vintage_client(endpoint);
-    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
     let cache: CacheService =
-        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+        CacheService::from_vintage(client, "g", "ns-a", CacheServiceOptions::default())
             .await
             .unwrap();
     cache.set("k", Bytes::from_static(b"v")).await.unwrap();
@@ -261,10 +258,9 @@ async fn namespace_yaml_error_keeps_old_backend() {
     let body = group_yaml(&mc.endpoint(), &mc.endpoint());
     let (endpoint, state, server) = spawn_vintage(body).await;
     let client = vintage_client(endpoint);
-    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
     let cache: CacheService =
-        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+        CacheService::from_vintage(client, "g", "ns-a", CacheServiceOptions::default())
             .await
             .unwrap();
     cache.set("k", Bytes::from_static(b"v")).await.unwrap();
@@ -295,21 +291,23 @@ async fn drop_cache_service_evicts_group_poll() {
     let body = group_yaml(&mc.endpoint(), &mc.endpoint());
     let (endpoint, state, server) = spawn_vintage(body).await;
     let client = vintage_client(endpoint.clone());
-    let source = VintageCacheServiceConfigSource::new(client, "g", "ns-a");
 
     let cache: CacheService =
-        CacheService::new_live(std::sync::Arc::new(source), CacheServiceOptions::default())
+        CacheService::from_vintage(client, "g", "ns-a", CacheServiceOptions::default())
             .await
             .unwrap();
     drop(cache);
     // Dropping the last CacheService should evict the group's Live, stopping
-    // the poll. Re-subscribe (new source) works.
+    // the poll. Re-subscribe (new from_vintage) works.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let source2 = VintageCacheServiceConfigSource::new(vintage_client(endpoint), "g", "ns-a");
-    let cache2: CacheService =
-        CacheService::new_live(std::sync::Arc::new(source2), CacheServiceOptions::default())
-            .await
-            .unwrap();
+    let cache2: CacheService = CacheService::from_vintage(
+        vintage_client(endpoint),
+        "g",
+        "ns-a",
+        CacheServiceOptions::default(),
+    )
+    .await
+    .unwrap();
     cache2.set("k2", Bytes::from_static(b"v2")).await.unwrap();
 
     drop(cache2);

@@ -9,8 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use memcache::cacheservice::{CacheServiceConfig, CacheServiceError};
-use memcache::service::vintage_live::CacheServiceInner;
+use memcache::cacheservice::CacheServiceConfig;
 use memcache::{
     CacheNamespaceConf, CacheService, CacheServiceConfigSource, CacheServiceOptions,
     SubscriptionHandle,
@@ -134,6 +133,7 @@ async fn partial_eq_skip_is_semantic() {
 
 #[tokio::test]
 async fn parse_namespace_yaml_errors_on_missing() {
-    let err = CacheServiceInner::parse_namespace_yaml("ns", "other:\n  master: []\n").unwrap_err();
-    assert!(matches!(err, CacheServiceError::MissingNamespace(_)));
+    // A YAML document that does not contain the requested namespace returns None.
+    let cfg = CacheServiceConfig::from_yaml_str("other:\n  master: []\n").unwrap();
+    assert!(cfg.namespace("ns").is_none());
 }

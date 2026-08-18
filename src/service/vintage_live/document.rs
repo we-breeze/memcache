@@ -156,6 +156,7 @@ impl GroupDocument {
     }
 
     /// The full group content.
+    #[allow(dead_code)]
     pub fn content(&self) -> &ConfigContent {
         &self.content
     }
@@ -169,6 +170,7 @@ impl GroupDocument {
     }
 
     /// The set of namespace names in this document.
+    #[allow(dead_code)]
     pub fn namespaces(&self) -> impl Iterator<Item = &str> {
         self.index.keys().map(|s| s.as_ref())
     }

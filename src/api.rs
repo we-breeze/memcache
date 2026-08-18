@@ -79,7 +79,8 @@ pub trait Memcache: Send + Sync {
 /// This trait is feature-independent so `CacheService` can be tested and driven
 /// by any source (in-process fakes, file watchers, Vintage, …) without the
 /// `service` feature. The Vintage adapter (`service::vintage_live`) is one
-/// implementation.
+/// implementation; `CacheService::from_vintage` is a convenience constructor
+/// for it.
 #[async_trait]
 pub trait CacheServiceConfigSource: Send + Sync {
     /// Loads the initial namespace configuration. Called once at construction.
@@ -208,6 +209,9 @@ impl CacheService {
     /// Builds a cache whose backend hot-swaps when `source` pushes new
     /// configuration. `source` drives the cache — `CacheService` itself never
     /// polls. The initial configuration is loaded once at construction.
+    ///
+    /// Use this with a custom [`CacheServiceConfigSource`] implementation; for
+    /// the common Vintage case prefer [`CacheService::from_vintage`].
     #[cfg(feature = "service")]
     pub async fn new_live(
         source: Arc<dyn CacheServiceConfigSource>,
@@ -249,6 +253,28 @@ impl CacheService {
                 _inner: inner,
             })),
         })
+    }
+
+    /// Builds a cache whose backend hot-swaps when the Vintage statics-config
+    /// `group`/`namespace` changes.
+    ///
+    /// This is the public live-construction entry point. It subscribes to the
+    /// Vintage group (one shared poll per group), and the backend is rebuilt
+    /// and atomically swapped in whenever this namespace's config changes;
+    /// unrelated namespace changes are ignored. `CacheService` itself never
+    /// polls — Vintage pushes updates. The driver is held alive for the
+    /// lifetime of the returned `CacheService`.
+    #[cfg(feature = "service")]
+    pub async fn from_vintage(
+        client: vintage::Client,
+        group: impl Into<String>,
+        namespace: impl Into<String>,
+        options: CacheServiceOptions,
+    ) -> Result<Self> {
+        let source = crate::service::vintage_live::VintageCacheServiceConfigSource::new(
+            client, group, namespace,
+        );
+        Self::new_live(Arc::new(source), options).await
     }
 
     fn build_backend(

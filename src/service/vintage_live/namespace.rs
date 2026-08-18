@@ -18,7 +18,7 @@ use crate::service::{MemCacheTemplate as Topology, PoolOptions};
 
 /// Errors raised while applying a namespace config update.
 #[derive(Debug, thiserror::Error)]
-pub enum NamespaceApplyError {
+pub(crate) enum NamespaceApplyError {
     /// The namespace content could not be parsed.
     #[error(transparent)]
     Config(#[from] CacheServiceError),
@@ -30,7 +30,8 @@ pub enum NamespaceApplyError {
 /// One namespace's live backend. Holds the current topology behind an
 /// `ArcSwapAny` shared with its [`crate::CacheService`], plus the last
 /// successfully applied config (for the semantic diff).
-pub struct CacheServiceInner {
+pub(crate) struct CacheServiceInner {
+    #[allow(dead_code)]
     namespace: Box<str>,
     options: CacheServiceOptions,
     backend: Arc<ArcSwapAny<Arc<BackendSlot>>>,
@@ -62,11 +63,6 @@ impl CacheServiceInner {
             backend,
             applied: ArcSwap::from_pointee(initial),
         })
-    }
-
-    /// The namespace name.
-    pub fn namespace(&self) -> &str {
-        &self.namespace
     }
 
     /// Parses one namespace's YAML slice into a `CacheNamespaceConf`. Used by

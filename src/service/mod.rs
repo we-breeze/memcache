@@ -44,7 +44,7 @@ mod template;
 #[cfg(feature = "service")]
 pub mod vintage;
 #[cfg(feature = "service")]
-pub mod vintage_live;
+pub(crate) mod vintage_live;
 
 pub use cacheable::Cacheable;
 pub use memcache_template::{MemCacheTemplate, MemCacheTemplateBuilder, PoolOptions, WritePolicy};

@@ -15,16 +15,13 @@ use super::namespace::CacheServiceInner;
 
 /// Errors raised while subscribing to a live cache-service namespace.
 #[derive(Debug, thiserror::Error)]
-pub enum VintageAdapterError {
+pub(crate) enum VintageAdapterError {
     /// The Vintage live-value subscription failed.
     #[error("vintage live-value error: {0}")]
     Vintage(#[from] vintage::LiveError),
     /// The cache-service group YAML could not be split or parsed.
     #[error(transparent)]
     Config(#[from] CacheServiceError),
-    /// The requested namespace was absent from the group.
-    #[error("namespace {0:?} not found in group")]
-    MissingNamespace(String),
 }
 
 /// One group's live handle plus a weak reference to its current value. The
@@ -40,7 +37,7 @@ type GroupEntry = (vintage::Live<CacheServiceGroup>, Weak<CacheServiceGroup>);
 /// namespace within the group; the group pushes that namespace's parsed config
 /// when its bytes change.
 #[derive(Clone)]
-pub struct VintageCacheServiceConfigSource {
+pub(crate) struct VintageCacheServiceConfigSource {
     inner: Arc<Inner>,
     group: String,
     namespace: String,
@@ -171,13 +168,5 @@ fn adapter_to_crate(error: VintageAdapterError) -> crate::Error {
     match error {
         VintageAdapterError::Vintage(e) => crate::Error::Protocol(format!("vintage: {e}")),
         VintageAdapterError::Config(e) => crate::Error::from(e),
-        VintageAdapterError::MissingNamespace(ns) => {
-            crate::Error::Protocol(format!("namespace {ns:?} not found"))
-        }
     }
 }
-
-// Re-export so the `CacheServiceConfig` parse path used by `load` stays
-// reachable for tests that build a source from a YAML fixture.
-#[allow(unused_imports)]
-use crate::cacheservice::CacheServiceConfig as _CsConfig;

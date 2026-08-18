@@ -23,7 +23,7 @@ type NamespaceSink = Arc<dyn Fn(crate::cacheservice::CacheNamespaceConf) + Send 
 /// One statics-config group's live state. The group's `GroupDocument` is
 /// refreshed in place via an `ArcSwap`; registered namespace callbacks are
 /// notified only when their namespace's bytes change.
-pub struct CacheServiceGroup {
+pub(crate) struct CacheServiceGroup {
     document: ArcSwap<GroupDocument>,
     /// Registered namespace callbacks. Each callback is kept alive by the
     /// `SubscriptionHandle` returned to the source; the group evicts a callback
@@ -39,7 +39,7 @@ impl std::fmt::Debug for CacheServiceGroup {
 
 impl CacheServiceGroup {
     /// The current group document.
-    pub fn document(&self) -> arc_swap::Guard<Arc<GroupDocument>> {
+    pub(crate) fn document(&self) -> arc_swap::Guard<Arc<GroupDocument>> {
         self.document.load()
     }
 
