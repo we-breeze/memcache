@@ -14,7 +14,6 @@ use arc_swap::{ArcSwap, ArcSwapAny};
 
 use crate::api::{BackendSlot, CacheServiceOptions};
 use crate::cacheservice::{CacheNamespaceConf, CacheServiceConfig, CacheServiceError};
-use crate::service::{MemCacheTemplate as Topology, PoolOptions};
 
 /// Errors raised while applying a namespace config update.
 #[derive(Debug, thiserror::Error)]
@@ -88,12 +87,10 @@ impl CacheServiceInner {
             return Ok(());
         }
 
-        let pool = PoolOptions::default().with_protocol(self.options.protocol);
-        let topology = Topology::from_namespace_conf(&next, pool)?
-            .with_default_expiration(self.options.default_expiration);
+        let current = self.backend.load_full();
+        let backend = crate::CacheService::build_backend(&next, self.options, current.topology())?;
         // Build succeeded → atomic swap.
-        self.backend
-            .store(Arc::new(BackendSlot(Arc::new(topology))));
+        self.backend.store(Arc::new(backend));
         self.applied.store(Arc::new(next));
         Ok(())
     }

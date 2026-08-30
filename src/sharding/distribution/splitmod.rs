@@ -1,4 +1,4 @@
-//use super::DIST_SPLIT_MOD_WITH_SLOT_PREFIX;
+// use super::DIST_SPLIT_MOD_WITH_SLOT_PREFIX;
 
 // 算法： hash/split_count%split_count%sharding
 #[derive(Clone, Debug, Default)]
