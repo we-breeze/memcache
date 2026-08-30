@@ -1,4 +1,4 @@
-use crate::direct::sharding::distribution::DIST_RANGE_SLOT_COUNT_DEFAULT;
+use super::DIST_RANGE_SLOT_COUNT_DEFAULT;
 
 // alg: hash/slot%slot/(slot/shards.len)
 // 按区间进行分布，比如[0,16)分区，每段间隔是4，则分为4个区间：[0,4),[4,8),[8,12),[12,16)

@@ -9,7 +9,7 @@ const FNV_32_INIT: u32 = 2166136261;
 const FNV_32_PRIME: u32 = 16777619;
 
 impl super::Hash for Fnv1F32 {
-    fn hash<S: crate::direct::sharding::hash::HashKey>(&self, key: &S) -> i64 {
+    fn hash<S: crate::sharding::hash::HashKey>(&self, key: &S) -> i64 {
         let mut hash = FNV_32_INIT;
         for i in 0..key.len() {
             hash = hash.wrapping_mul(FNV_32_PRIME);
@@ -28,7 +28,7 @@ const FNV_64_INIT: u64 = 0xcbf29ce484222325;
 const FNV_64_PRIME: u64 = 0x100000001b3;
 
 impl super::Hash for Fnv1aF64 {
-    fn hash<S: crate::direct::sharding::hash::HashKey>(&self, key: &S) -> i64 {
+    fn hash<S: crate::sharding::hash::HashKey>(&self, key: &S) -> i64 {
         let mut hash = FNV_64_INIT as u32;
         for i in 0..key.len() {
             hash ^= key.at(i) as u32;

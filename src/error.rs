@@ -11,17 +11,9 @@ pub enum Error {
     #[error(transparent)]
     CacheServiceConfig(#[from] crate::cacheservice::CacheServiceError),
 
-    /// Failed to establish the underlying connection.
-    #[error("connect failed: {0}")]
-    Connect(#[source] io::Error),
-
     /// Transport-level I/O error on an established connection.
     #[error("io error: {0}")]
     Io(#[source] io::Error),
-
-    /// The pool could not hand out a connection (exhausted, timed out, ...).
-    #[error("connection pool error: {0}")]
-    Pool(String),
 
     /// Could not locate a mesh endpoint in the socks registry directory.
     #[error("mesh discovery: {0}")]
@@ -30,6 +22,14 @@ pub enum Error {
     /// An operation exceeded the configured timeout.
     #[error("operation timed out")]
     Timeout,
+
+    /// The physical node has not connected yet or is reconnecting.
+    #[error("backend connection is unavailable")]
+    Unavailable,
+
+    /// The physical node's bounded request queue is full.
+    #[error("backend request capacity is exhausted")]
+    Overloaded,
 
     /// The server reported a `SERVER_ERROR` (text) or a server-side status.
     #[error("server error: {0}")]
@@ -66,17 +66,5 @@ pub enum Error {
 impl From<io::Error> for Error {
     fn from(err: io::Error) -> Self {
         Error::Io(err)
-    }
-}
-
-impl<E: std::fmt::Display> From<deadpool::managed::PoolError<E>> for Error {
-    fn from(err: deadpool::managed::PoolError<E>) -> Self {
-        match err {
-            deadpool::managed::PoolError::Backend(err) => Error::Pool(err.to_string()),
-            deadpool::managed::PoolError::Timeout(kind) => {
-                Error::Pool(format!("timeout ({kind:?})"))
-            }
-            other => Error::Pool(other.to_string()),
-        }
     }
 }

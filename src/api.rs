@@ -1,13 +1,15 @@
 //! The application-facing memcache contract and CacheService implementation.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use arc_swap::ArcSwapAny;
 use async_trait::async_trait;
 use bytes::Bytes;
 
+use crate::cache_topology::CacheTopology;
 use crate::cacheservice::CacheNamespaceConf;
-use crate::service::{Cacheable, MemCacheTemplate as Topology, PoolOptions};
+use crate::mesh::MeshConfig;
+use crate::service::Cacheable;
 use crate::value::Value;
 use crate::{Expiration, Protocol, Result};
 /// A value returned by [`Memcache::get`].
@@ -135,11 +137,23 @@ impl Drop for SubscriptionHandle {
 pub struct CacheServiceOptions {
     /// Expiration used when [`SetOptions::expiration`] is `None`.
     pub default_expiration: Expiration,
-    /// Wire protocol used by the direct topology built by [`CacheService`].
+    /// Wire protocol used by the topology built by [`CacheService`].
     ///
-    /// This does not override the protocol of an explicitly supplied sidecar
-    /// [`crate::sidecar::MeshConfig`].
+    /// This does not override the protocol of an explicitly supplied
+    /// [`crate::MeshConfig`].
     pub protocol: Protocol,
+    /// Fallback master request timeout when the namespace does not override it.
+    pub master_timeout: Duration,
+    /// Fallback non-master request timeout when the namespace does not override it.
+    pub slave_timeout: Duration,
+    /// TCP connection-establishment timeout.
+    pub connect_timeout: Duration,
+    /// Accumulated request time before moving to the next local replica group.
+    pub replica_quota: Duration,
+    /// Minimum quota charged for a transport-level failure.
+    pub failure_penalty: Duration,
+    /// Whether foreground writes propagate to master-L1 groups.
+    pub update_master_l1: bool,
 }
 
 impl Default for CacheServiceOptions {
@@ -147,6 +161,12 @@ impl Default for CacheServiceOptions {
         Self {
             default_expiration: Expiration::default(),
             protocol: Protocol::Text,
+            master_timeout: Duration::from_millis(100),
+            slave_timeout: Duration::from_millis(100),
+            connect_timeout: Duration::from_secs(2),
+            replica_quota: Duration::from_secs(2),
+            failure_penalty: Duration::from_millis(500),
+            update_master_l1: true,
         }
     }
 }
@@ -160,24 +180,86 @@ impl CacheServiceOptions {
         }
     }
 
-    /// Selects the wire protocol for the direct cache-service topology.
+    /// Selects the wire protocol for the cache-service topology.
     #[must_use]
     pub fn with_protocol(mut self, protocol: Protocol) -> Self {
         self.protocol = protocol;
         self
     }
+
+    #[must_use]
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.master_timeout = timeout;
+        self.slave_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_master_timeout(mut self, timeout: Duration) -> Self {
+        self.master_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_slave_timeout(mut self, timeout: Duration) -> Self {
+        self.slave_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_connect_timeout(mut self, timeout: Duration) -> Self {
+        self.connect_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_update_master_l1(mut self, enabled: bool) -> Self {
+        self.update_master_l1 = enabled;
+        self
+    }
 }
 
-/// Sized wrapper so the backend can live in an `ArcSwapAny` (which requires
-/// `Sized` pointees) while callers still see `Arc<dyn Cacheable>`. Mirrors
-/// `service::template::BackupSlot`.
-pub(crate) struct BackendSlot(pub(crate) Arc<dyn Cacheable>);
+/// Sized production/test dispatch stored behind the COW topology snapshot.
+/// The production hot path is concrete; dynamic dispatch only exists in unit
+/// tests that inject a recording backend.
+pub(crate) enum BackendSlot {
+    Net(CacheTopology),
+    #[cfg(test)]
+    Test(Arc<dyn Cacheable>),
+}
+
+impl BackendSlot {
+    async fn get(&self, key: &str) -> Result<Option<Value>> {
+        match self {
+            Self::Net(topology) => topology.get(key).await,
+            #[cfg(test)]
+            Self::Test(backend) => backend.get(key).await,
+        }
+    }
+
+    async fn set(&self, key: &str, value: Value, expiration: Expiration) -> Result<bool> {
+        match self {
+            Self::Net(topology) => topology.set(key, value, expiration).await,
+            #[cfg(test)]
+            Self::Test(backend) => backend.set(key, value, expiration).await,
+        }
+    }
+
+    #[cfg(feature = "service")]
+    pub(crate) fn topology(&self) -> Option<&CacheTopology> {
+        match self {
+            Self::Net(topology) => Some(topology),
+            #[cfg(test)]
+            Self::Test(_) => None,
+        }
+    }
+}
 
 /// A CacheService-backed [`Memcache`] implementation.
 ///
-/// This is the stable application facade. It delegates topology behavior to
-/// the Java-compatible master/slave/L1 implementation without exposing its
-/// pools, builders, or broader `Cacheable` operation surface.
+/// This is the stable application facade. Its production backend mirrors the
+/// reference_client master/master-L1/slave/slave-L1 topology over one persistent
+/// `brz-net` session per physical node.
 ///
 /// The backend lives behind an `ArcSwapAny` so it can be hot-swapped at
 /// runtime. Construct via [`CacheService::new`] for a fixed (one-shot)
@@ -194,13 +276,62 @@ pub struct CacheService {
 }
 
 impl CacheService {
+    /// Connects to a mesh-managed cache identified by `group` and `namespace`.
+    ///
+    /// The local breeze sidecar owns backend sharding and failover. This
+    /// discovers its TCP port once, then builds the same fixed single-node
+    /// topology as [`CacheService::single`].
+    pub async fn mesh(group: impl Into<String>, namespace: impl Into<String>) -> Result<Self> {
+        Self::mesh_with_options(group, namespace, CacheServiceOptions::default()).await
+    }
+
+    /// Connects to a mesh-managed cache with explicit application options.
+    pub async fn mesh_with_options(
+        group: impl Into<String>,
+        namespace: impl Into<String>,
+        options: CacheServiceOptions,
+    ) -> Result<Self> {
+        let config = MeshConfig::new(namespace).with_group(group);
+        Self::mesh_with_config(config, options).await
+    }
+
+    /// Connects using explicit mesh discovery, protocol, and timeout settings.
+    pub async fn mesh_with_config(
+        config: MeshConfig,
+        mut options: CacheServiceOptions,
+    ) -> Result<Self> {
+        let endpoint = config.resolve()?;
+        options.protocol = config.protocol;
+        options.connect_timeout = config.connect_timeout;
+        options.master_timeout = config.op_timeout;
+        options.slave_timeout = config.op_timeout;
+
+        Self::single_with_options(format!("{}:{}", endpoint.host, endpoint.port), options).await
+    }
+
+    /// Builds one unsharded master endpoint using CacheService defaults.
+    ///
+    /// The resulting topology contains exactly one replica group, one shard,
+    /// one physical node, and one persistent TCP connection.
+    pub async fn single(endpoint: impl Into<String>) -> Result<Self> {
+        Self::single_with_options(endpoint, CacheServiceOptions::default()).await
+    }
+
+    /// Builds one unsharded master endpoint with explicit transport options.
+    pub async fn single_with_options(
+        endpoint: impl Into<String>,
+        options: CacheServiceOptions,
+    ) -> Result<Self> {
+        Self::new(CacheNamespaceConf::single_master(endpoint.into()), options).await
+    }
+
     /// Builds a cache from a fixed (one-shot) namespace configuration. The
     /// backend never changes — use [`CacheService::new_live`] for a backend
     /// that hot-swaps on config change.
     pub async fn new(conf: CacheNamespaceConf, options: CacheServiceOptions) -> Result<Self> {
-        let backend = Self::build_backend(&conf, options)?;
+        let backend = Self::build_backend(&conf, options, None)?;
         Ok(Self {
-            backend: Arc::new(ArcSwapAny::new(Arc::new(BackendSlot(backend)))),
+            backend: Arc::new(ArcSwapAny::new(Arc::new(backend))),
             options,
             _hold: None,
         })
@@ -218,8 +349,8 @@ impl CacheService {
         options: CacheServiceOptions,
     ) -> Result<Self> {
         let initial = source.load().await?;
-        let backend = Self::build_backend(&initial, options)?;
-        let backend_slot = Arc::new(ArcSwapAny::new(Arc::new(BackendSlot(backend))));
+        let backend = Self::build_backend(&initial, options, None)?;
+        let backend_slot = Arc::new(ArcSwapAny::new(Arc::new(backend)));
 
         let inner = crate::service::vintage_live::CacheServiceInner::new(
             /* namespace placeholder */ "",
@@ -277,19 +408,19 @@ impl CacheService {
         Self::new_live(Arc::new(source), options).await
     }
 
-    fn build_backend(
+    pub(crate) fn build_backend(
         conf: &CacheNamespaceConf,
         options: CacheServiceOptions,
-    ) -> Result<Arc<dyn Cacheable>> {
-        let pool_options = PoolOptions::default().with_protocol(options.protocol);
-        let topology = Topology::from_namespace_conf(conf, pool_options)?
-            .with_default_expiration(options.default_expiration);
-        Ok(Arc::new(topology))
+        previous: Option<&CacheTopology>,
+    ) -> Result<BackendSlot> {
+        Ok(BackendSlot::Net(CacheTopology::from_namespace_conf(
+            conf, options, previous,
+        )?))
     }
 
-    /// Loads the current backend as a cheap `Arc` clone.
-    fn backend(&self) -> Arc<dyn Cacheable> {
-        self.backend.load_full().0.clone()
+    /// Loads the current immutable topology snapshot as a cheap `Arc` clone.
+    fn backend(&self) -> Arc<BackendSlot> {
+        self.backend.load_full()
     }
 
     /// Test-only constructor that installs a prebuilt backend directly. Used by
@@ -297,7 +428,7 @@ impl CacheService {
     #[cfg(test)]
     pub(crate) fn from_backend(backend: Arc<dyn Cacheable>, options: CacheServiceOptions) -> Self {
         Self {
-            backend: Arc::new(ArcSwapAny::new(Arc::new(BackendSlot(backend)))),
+            backend: Arc::new(ArcSwapAny::new(Arc::new(BackendSlot::Test(backend)))),
             options,
             _hold: None,
         }

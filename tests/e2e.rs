@@ -1,556 +1,114 @@
-//! End-to-end tests that drive the real client against an in-process fake
-//! memcached server. The fake server implements enough of each wire protocol
-//! (text and binary) to validate encoding and decoding round-trips without a
-//! real memcached instance.
+//! End-to-end coverage for the unified CacheService facade.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-#[cfg(feature = "direct-mock")]
-use memcache::Client;
-use memcache::sidecar::{MeshConfig, SidecarClient};
-use memcache::{
-    CacheNamespaceConf, CacheService, CacheServiceConfig, CacheServiceOptions, CasValue, Config,
-    Endpoint, Expiration, Memcache, Protocol, SetOptions, SidecarMemcache,
+use memcache::{CacheService, CacheServiceOptions, Memcache, MeshConfig, Protocol};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    net::{TcpListener, TcpStream},
+    sync::Mutex,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
-#[derive(Clone)]
-struct Item {
-    data: Vec<u8>,
-    flags: u32,
-    cas: u64,
-}
+type Store = Arc<Mutex<HashMap<String, (Vec<u8>, u32)>>>;
 
-type Store = Arc<Mutex<HashMap<String, Item>>>;
-
-fn cache_service_conf(port: u16) -> CacheNamespaceConf {
-    let yaml = format!("test:\n  master:\n  - 127.0.0.1:{port}\n");
-    CacheServiceConfig::from_yaml_str(&yaml)
-        .unwrap()
-        .namespace("test")
-        .unwrap()
-        .clone()
-}
-
-/// Spawn a fake server speaking `protocol`; returns the bound port.
-async fn spawn(protocol: Protocol) -> u16 {
+async fn spawn_text_server() -> (u16, Store) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let store: Store = Arc::new(Mutex::new(HashMap::new()));
+    let store = Store::default();
+    let shared = store.clone();
     tokio::spawn(async move {
         loop {
-            let Ok((sock, _)) = listener.accept().await else {
-                break;
-            };
-            let store = store.clone();
+            let (stream, _) = listener.accept().await.unwrap();
+            let store = shared.clone();
             tokio::spawn(async move {
-                let _ = match protocol {
-                    Protocol::Text => handle_text(sock, store).await,
-                    Protocol::Binary => handle_binary(sock, store).await,
-                };
+                serve_text(stream, store).await;
             });
         }
     });
-    port
+    (port, store)
 }
 
-async fn handle_text(sock: tokio::net::TcpStream, store: Store) -> std::io::Result<()> {
-    let (read_half, mut writer) = sock.into_split();
-    let mut reader = BufReader::new(read_half);
-    let mut cas_counter: u64 = 1;
+async fn serve_text(stream: TcpStream, store: Store) {
+    let mut stream = BufReader::new(stream);
     loop {
-        let mut line = Vec::new();
-        let read = tokio::io::AsyncBufReadExt::read_until(&mut reader, b'\n', &mut line).await?;
-        if read == 0 {
-            return Ok(());
+        let mut line = String::new();
+        match stream.read_line(&mut line).await {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
         }
-        let trimmed = &line[..line.len().saturating_sub(2)];
-        let text = String::from_utf8_lossy(trimmed).into_owned();
-        let tokens: Vec<&str> = text.split_whitespace().collect();
-        if tokens.is_empty() {
-            continue;
-        }
-        match tokens[0] {
-            cmd @ ("set" | "add" | "replace") => {
-                let key = tokens[1].to_string();
-                let flags: u32 = tokens[2].parse().unwrap();
-                let bytes: usize = tokens[4].parse().unwrap();
-                let mut data = vec![0u8; bytes + 2];
-                reader.read_exact(&mut data).await?;
-                data.truncate(bytes);
-                let mut map = store.lock().await;
-                let exists = map.contains_key(&key);
-                let ok = match cmd {
-                    "add" => !exists,
-                    "replace" => exists,
-                    _ => true,
-                };
-                let reply = if ok {
-                    cas_counter += 1;
-                    map.insert(
-                        key,
-                        Item {
-                            data,
-                            flags,
-                            cas: cas_counter,
-                        },
-                    );
-                    "STORED\r\n"
+        let fields: Vec<_> = line.trim_end().split(' ').collect();
+        match fields.as_slice() {
+            ["get", key] | ["gets", key] => {
+                let item = store.lock().await.get(*key).cloned();
+                let output = if let Some((value, flags)) = item {
+                    format!(
+                        "VALUE {key} {flags} {}\r\n{}\r\nEND\r\n",
+                        value.len(),
+                        String::from_utf8_lossy(&value)
+                    )
                 } else {
-                    "NOT_STORED\r\n"
+                    "END\r\n".to_string()
                 };
-                writer.write_all(reply.as_bytes()).await?;
-            }
-            "cas" => {
-                let key = tokens[1].to_string();
-                let flags: u32 = tokens[2].parse().unwrap();
-                let bytes: usize = tokens[4].parse().unwrap();
-                let cas: u64 = tokens[5].parse().unwrap();
-                let mut data = vec![0u8; bytes + 2];
-                reader.read_exact(&mut data).await?;
-                data.truncate(bytes);
-                let mut map = store.lock().await;
-                let reply = match map.get(&key) {
-                    None => "NOT_FOUND\r\n",
-                    Some(item) if item.cas != cas => "EXISTS\r\n",
-                    Some(_) => {
-                        cas_counter += 1;
-                        map.insert(
-                            key,
-                            Item {
-                                data,
-                                flags,
-                                cas: cas_counter,
-                            },
-                        );
-                        "STORED\r\n"
-                    }
-                };
-                writer.write_all(reply.as_bytes()).await?;
-            }
-            cmd @ ("get" | "gets") => {
-                let map = store.lock().await;
-                let mut out = Vec::new();
-                for key in &tokens[1..] {
-                    if let Some(item) = map.get(*key) {
-                        if cmd == "gets" {
-                            out.extend_from_slice(
-                                format!(
-                                    "VALUE {} {} {} {}\r\n",
-                                    key,
-                                    item.flags,
-                                    item.data.len(),
-                                    item.cas
-                                )
-                                .as_bytes(),
-                            );
-                        } else {
-                            out.extend_from_slice(
-                                format!("VALUE {} {} {}\r\n", key, item.flags, item.data.len())
-                                    .as_bytes(),
-                            );
-                        }
-                        out.extend_from_slice(&item.data);
-                        out.extend_from_slice(b"\r\n");
-                    }
+                if stream.get_mut().write_all(output.as_bytes()).await.is_err() {
+                    return;
                 }
-                out.extend_from_slice(b"END\r\n");
-                writer.write_all(&out).await?;
             }
-            "delete" => {
-                let key = tokens[1];
-                let removed = store.lock().await.remove(key).is_some();
-                writer
-                    .write_all(if removed {
-                        b"DELETED\r\n"
-                    } else {
-                        b"NOT_FOUND\r\n"
-                    })
-                    .await?;
-            }
-            cmd @ ("incr" | "decr") => {
-                let key = tokens[1];
-                let delta: u64 = tokens[2].parse().unwrap();
-                let mut map = store.lock().await;
-                let reply = match map.get_mut(key) {
-                    None => "NOT_FOUND\r\n".to_string(),
-                    Some(item) => {
-                        let current: u64 = String::from_utf8_lossy(&item.data)
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        let next = if cmd == "incr" {
-                            current + delta
-                        } else {
-                            current.saturating_sub(delta)
-                        };
-                        item.data = next.to_string().into_bytes();
-                        format!("{next}\r\n")
-                    }
+            ["set", key, flags, _, length] => {
+                let Ok(length) = length.parse::<usize>() else {
+                    return;
                 };
-                writer.write_all(reply.as_bytes()).await?;
+                let Ok(flags) = flags.parse::<u32>() else {
+                    return;
+                };
+                let mut value = vec![0; length + 2];
+                if stream.read_exact(&mut value).await.is_err() {
+                    return;
+                }
+                value.truncate(length);
+                store
+                    .lock()
+                    .await
+                    .insert((*key).to_string(), (value, flags));
+                if stream.get_mut().write_all(b"STORED\r\n").await.is_err() {
+                    return;
+                }
             }
-            "touch" => {
-                let key = tokens[1];
-                let found = store.lock().await.contains_key(key);
-                writer
-                    .write_all(if found {
-                        b"TOUCHED\r\n"
-                    } else {
-                        b"NOT_FOUND\r\n"
-                    })
-                    .await?;
-            }
-            "flush_all" => {
-                store.lock().await.clear();
-                writer.write_all(b"OK\r\n").await?;
-            }
-            "version" => {
-                writer.write_all(b"VERSION 1.6.0-fake\r\n").await?;
-            }
-            _ => {
-                writer.write_all(b"ERROR\r\n").await?;
-            }
+            _ => return,
         }
-        writer.flush().await?;
     }
 }
 
-const REQ: u8 = 0x80;
-const RESP: u8 = 0x81;
-
-fn frame(
-    opcode: u8,
-    status: u16,
-    extras: &[u8],
-    key: &[u8],
-    value: &[u8],
-    opaque: u32,
-    cas: u64,
-) -> Vec<u8> {
-    let body = extras.len() + key.len() + value.len();
-    let mut buf = Vec::with_capacity(24 + body);
-    buf.push(RESP);
-    buf.push(opcode);
-    buf.extend_from_slice(&(key.len() as u16).to_be_bytes());
-    buf.push(extras.len() as u8);
-    buf.push(0);
-    buf.extend_from_slice(&status.to_be_bytes());
-    buf.extend_from_slice(&(body as u32).to_be_bytes());
-    buf.extend_from_slice(&opaque.to_be_bytes());
-    buf.extend_from_slice(&cas.to_be_bytes());
-    buf.extend_from_slice(extras);
-    buf.extend_from_slice(key);
-    buf.extend_from_slice(value);
-    buf
-}
-
-async fn handle_binary(mut sock: tokio::net::TcpStream, store: Store) -> std::io::Result<()> {
-    let mut cas_counter: u64 = 1;
+async fn set_when_connected(cache: &CacheService, key: &str, value: Bytes) -> bool {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
-        let mut header = [0u8; 24];
-        if sock.read_exact(&mut header).await.is_err() {
-            return Ok(());
-        }
-        assert_eq!(header[0], REQ, "bad request magic");
-        let opcode = header[1];
-        let key_len = u16::from_be_bytes([header[2], header[3]]) as usize;
-        let extras_len = header[4] as usize;
-        let body_len = u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
-        let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
-        let cas = u64::from_be_bytes(header[16..24].try_into().unwrap());
-        let mut body = vec![0u8; body_len];
-        sock.read_exact(&mut body).await?;
-        let extras = &body[..extras_len];
-        let key = String::from_utf8_lossy(&body[extras_len..extras_len + key_len]).into_owned();
-        let value = &body[extras_len + key_len..];
-
-        let response = match opcode {
-            0x01..=0x03 => {
-                // set / add / replace
-                let flags = u32::from_be_bytes(extras[0..4].try_into().unwrap());
-                let mut map = store.lock().await;
-                let exists = map.contains_key(&key);
-                let allowed = match opcode {
-                    0x02 => !exists,
-                    0x03 => exists,
-                    _ => true,
-                };
-                let cas_ok = cas == 0 || map.get(&key).map(|item| item.cas) == Some(cas);
-                if allowed && cas_ok {
-                    cas_counter += 1;
-                    map.insert(
-                        key,
-                        Item {
-                            data: value.to_vec(),
-                            flags,
-                            cas: cas_counter,
-                        },
-                    );
-                    frame(opcode, 0x0000, &[], &[], &[], opaque, cas_counter)
-                } else if !cas_ok {
-                    frame(opcode, 0x0002, &[], &[], b"exists", opaque, 0)
-                } else {
-                    frame(opcode, 0x0005, &[], &[], b"not stored", opaque, 0)
-                }
+        match cache.set(key, value.clone()).await {
+            Ok(result) => return result,
+            Err(memcache::Error::Unavailable) if tokio::time::Instant::now() < deadline => {
+                tokio::task::yield_now().await;
             }
-            0x00 => {
-                // get
-                let map = store.lock().await;
-                match map.get(&key) {
-                    Some(item) => frame(
-                        opcode,
-                        0x0000,
-                        &item.flags.to_be_bytes(),
-                        &[],
-                        &item.data,
-                        opaque,
-                        item.cas,
-                    ),
-                    None => frame(opcode, 0x0001, &[], &[], b"not found", opaque, 0),
-                }
-            }
-            0x0D => {
-                // getkq (quiet multi-get): reply only on hit, with key echoed
-                let map = store.lock().await;
-                match map.get(&key) {
-                    Some(item) => frame(
-                        opcode,
-                        0x0000,
-                        &item.flags.to_be_bytes(),
-                        key.as_bytes(),
-                        &item.data,
-                        opaque,
-                        item.cas,
-                    ),
-                    None => Vec::new(),
-                }
-            }
-            0x0A => frame(0x0A, 0x0000, &[], &[], &[], opaque, 0), // noop fence
-            0x04 => {
-                let removed = store.lock().await.remove(&key).is_some();
-                if removed {
-                    frame(opcode, 0x0000, &[], &[], &[], opaque, 0)
-                } else {
-                    frame(opcode, 0x0001, &[], &[], b"not found", opaque, 0)
-                }
-            }
-            0x05 | 0x06 => {
-                // incr / decr: delta is first 8 extra bytes
-                let delta = u64::from_be_bytes(extras[0..8].try_into().unwrap());
-                let mut map = store.lock().await;
-                match map.get_mut(&key) {
-                    None => frame(opcode, 0x0001, &[], &[], b"not found", opaque, 0),
-                    Some(item) => {
-                        let current: u64 = String::from_utf8_lossy(&item.data)
-                            .trim()
-                            .parse()
-                            .unwrap_or(0);
-                        let next = if opcode == 0x05 {
-                            current + delta
-                        } else {
-                            current.saturating_sub(delta)
-                        };
-                        item.data = next.to_string().into_bytes();
-                        frame(
-                            opcode,
-                            0x0000,
-                            &[],
-                            &[],
-                            &next.to_be_bytes(),
-                            opaque,
-                            item.cas,
-                        )
-                    }
-                }
-            }
-            0x1C => {
-                let found = store.lock().await.contains_key(&key);
-                frame(
-                    opcode,
-                    if found { 0x0000 } else { 0x0001 },
-                    &[],
-                    &[],
-                    &[],
-                    opaque,
-                    0,
-                )
-            }
-            0x08 => {
-                store.lock().await.clear();
-                frame(opcode, 0x0000, &[], &[], &[], opaque, 0)
-            }
-            0x0B => frame(opcode, 0x0000, &[], &[], b"1.6.0-fake", opaque, 0),
-            _ => frame(opcode, 0x0081, &[], &[], b"unknown", opaque, 0),
-        };
-        if !response.is_empty() {
-            sock.write_all(&response).await?;
-            sock.flush().await?;
+            result => return result.unwrap(),
         }
     }
 }
 
-fn client(port: u16, protocol: Protocol) -> SidecarClient {
-    SidecarClient::new(
-        Config::tcp("127.0.0.1", port)
-            .with_protocol(protocol)
-            .with_max_connections(2),
-    )
-    .unwrap()
-}
-
-async fn run_crud_suite(protocol: Protocol) {
-    let port = spawn(protocol).await;
-    let client = client(port, protocol);
-
-    // miss then set then hit
-    assert!(client.get("alpha").await.unwrap().is_none());
-    assert!(client.set("alpha", "hello", 60u32).await.unwrap());
-    let value = client.get("alpha").await.unwrap().unwrap();
-    assert_eq!(value.as_string().unwrap(), "hello");
-
-    // add is rejected when the key exists, replace requires existence
-    assert!(!client.add("alpha", "again", 60u32).await.unwrap());
-    assert!(client.replace("alpha", "world", 60u32).await.unwrap());
-    assert!(!client.replace("missing", "x", 60u32).await.unwrap());
-    assert_eq!(
-        client
-            .get("alpha")
-            .await
-            .unwrap()
-            .unwrap()
-            .as_string()
-            .unwrap(),
-        "world"
-    );
-
-    // multi-get returns only the present keys
-    client.set("beta", "2", 60u32).await.unwrap();
-    let multi = client.get_multi(&["alpha", "beta", "ghost"]).await.unwrap();
-    assert_eq!(multi.len(), 2);
-    assert_eq!(multi["alpha"].as_string().unwrap(), "world");
-    assert_eq!(multi["beta"].as_string().unwrap(), "2");
-
-    // cas round-trip
-    let cas = client.get_cas("alpha").await.unwrap().unwrap();
-    let updated = CasValue::new("cas-updated".to_memcache_owned(), cas.cas);
-    assert!(client.cas("alpha", &updated, 60u32).await.unwrap());
-    let stale = CasValue::new("stale".to_memcache_owned(), cas.cas);
-    assert!(!client.cas("alpha", &stale, 60u32).await.unwrap());
-
-    // counters
-    client.set("counter", "10", 60u32).await.unwrap();
-    assert_eq!(client.incr("counter", 5).await.unwrap(), Some(15));
-    assert_eq!(client.decr("counter", 3).await.unwrap(), Some(12));
-    assert_eq!(client.incr("ghost", 1).await.unwrap(), None);
-
-    // delete
-    assert!(client.delete("beta").await.unwrap());
-    assert!(!client.delete("beta").await.unwrap());
-    assert!(client.get("beta").await.unwrap().is_none());
-
-    // misc
-    assert!(client.version().await.unwrap().contains("fake"));
-    client.flush_all().await.unwrap();
-    assert!(client.get("alpha").await.unwrap().is_none());
-}
-
-// Small helper so the test can build owned values for CasValue.
-trait ToOwnedValue {
-    fn to_memcache_owned(self) -> memcache::Value;
-}
-impl ToOwnedValue for &str {
-    fn to_memcache_owned(self) -> memcache::Value {
-        memcache::Value::new(self.as_bytes().to_vec(), 0)
-    }
-}
-
 #[tokio::test]
-async fn text_protocol_crud() {
-    run_crud_suite(Protocol::Text).await;
-}
-
-/// A client built with `min_connections` prewarms the pool: shortly after
-/// construction the pool already holds that many idle connections, ready for
-/// the first requests.
-#[tokio::test]
-async fn prewarms_min_connections() {
-    let port = spawn(Protocol::Binary).await;
-    let client = SidecarClient::new(
-        Config::tcp("127.0.0.1", port)
-            .with_protocol(Protocol::Binary)
-            .with_min_connections(5)
-            .with_max_connections(128),
-    )
-    .unwrap();
-
-    // Prewarm runs in the background; poll briefly for the pool to fill.
-    let mut size = 0;
-    for _ in 0..200 {
-        size = client.pool_size();
-        if size >= 5 {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert_eq!(size, 5, "pool should hold the 5 prewarmed connections");
-
-    // The pool still grows past the initial size on demand, up to max.
-    assert!(client.get("k").await.unwrap().is_none());
-    assert!(client.pool_size() >= 5);
-}
-
-#[tokio::test]
-async fn binary_protocol_crud() {
-    run_crud_suite(Protocol::Binary).await;
-}
-
-#[tokio::test]
-async fn cache_service_uses_text_protocol_by_default() {
-    let port = spawn(Protocol::Text).await;
-    let cache = CacheService::new(cache_service_conf(port), CacheServiceOptions::default())
+async fn single_is_one_fixed_cache_service_node() {
+    let (port, _) = spawn_text_server().await;
+    let cache = CacheService::single(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
 
-    assert!(
-        cache
-            .set("default-text", Bytes::from_static(b"value"))
-            .await
-            .unwrap()
-    );
+    assert!(set_when_connected(&cache, "single", Bytes::from_static(b"value")).await);
     assert_eq!(
-        cache.get("default-text").await.unwrap().unwrap().data,
+        cache.get("single").await.unwrap().unwrap().data,
         Bytes::from_static(b"value")
     );
 }
 
 #[tokio::test]
-async fn cache_service_options_can_select_binary_protocol() {
-    let port = spawn(Protocol::Binary).await;
-    let options = CacheServiceOptions::default().with_protocol(Protocol::Binary);
-    let cache = CacheService::new(cache_service_conf(port), options)
-        .await
-        .unwrap();
-
-    assert!(
-        cache
-            .set("explicit-binary", Bytes::from_static(b"value"))
-            .await
-            .unwrap()
-    );
-    assert_eq!(
-        cache.get("explicit-binary").await.unwrap().unwrap().data,
-        Bytes::from_static(b"value")
-    );
-}
-
-#[tokio::test]
-async fn sidecar_memcache_implements_application_contract() {
-    let port = spawn(Protocol::Binary).await;
+async fn mesh_discovers_tcp_then_uses_single_topology() {
+    let (port, store) = spawn_text_server().await;
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join(format!(
@@ -562,463 +120,61 @@ async fn sidecar_memcache_implements_application_contract() {
     let config = MeshConfig::new("ns")
         .with_group("grp")
         .with_socket_dir(dir.path())
-        .with_min_connections(0)
-        .with_max_connections(2);
-    let cache = SidecarMemcache::from_mesh_config(
-        config,
-        CacheServiceOptions::new(Expiration::Seconds(90)),
-    )
-    .unwrap();
-
-    assert!(
-        cache
-            .set("plain", Bytes::from_static(b"value"))
-            .await
-            .unwrap()
-    );
-    let plain = cache.get("plain").await.unwrap().unwrap();
-    assert_eq!(plain.data, Bytes::from_static(b"value"));
-    assert_eq!(plain.flags, None);
-
-    assert!(
-        cache
-            .set_with(
-                "tagged",
-                Bytes::from_static(b"tagged-value"),
-                SetOptions::default()
-                    .with_expiration(Expiration::Seconds(5))
-                    .with_flags(32),
-            )
-            .await
-            .unwrap()
-    );
-    let tagged = cache.get("tagged").await.unwrap().unwrap();
-    assert_eq!(tagged.data, Bytes::from_static(b"tagged-value"));
-    assert_eq!(tagged.flags, Some(32));
-}
-
-/// HA mode: writes go to the master tier; reads fall back down
-/// `slave_l1 → slave → master`. With double-write off, a key written
-/// through the HA client exists only on the master; with it on, the slave
-/// tier is written too.
-#[tokio::test]
-#[cfg(feature = "direct-mock")]
-async fn ha_client_read_fallback_and_double_write() {
-    use memcache::direct::{DirectClient, HaClient, HaConfig, ServerConfig};
-
-    let port_master = spawn(Protocol::Binary).await;
-    let port_l1 = spawn(Protocol::Binary).await;
-    let port_slave = spawn(Protocol::Binary).await;
-    let addr = |port: u16| format!("127.0.0.1:{port}");
-    let direct =
-        |port: u16| DirectClient::connect(ServerConfig::new(&addr(port)).unwrap()).unwrap();
-
-    let config = HaConfig::new(vec![addr(port_master)])
-        .with_slave_l1(vec![addr(port_l1)])
-        .with_slaves(vec![addr(port_slave)])
-        .with_server(ServerConfig::new(&addr(port_master)).unwrap());
-
-    // --- fallback chain: key lives only on the master ---
-    let ha = HaClient::connect(config.clone()).unwrap();
-    ha.set("k", "from-master", 60u32).await.unwrap();
-    assert!(direct(port_l1).get("k").await.unwrap().is_none());
-    assert!(direct(port_slave).get("k").await.unwrap().is_none());
-    assert_eq!(
-        ha.get("k").await.unwrap().unwrap().as_string().unwrap(),
-        "from-master",
-        "read must fall back to the master tier"
-    );
-
-    // --- L1 serves reads first when it has the key ---
-    direct(port_l1).set("k", "from-l1", 60u32).await.unwrap();
-    assert_eq!(
-        ha.get("k").await.unwrap().unwrap().as_string().unwrap(),
-        "from-l1",
-        "read must be served by slave_l1 before master"
-    );
-
-    // --- slave tier serves reads when L1 misses ---
-    direct(port_l1).delete("k2").await.unwrap();
-    direct(port_slave)
-        .set("k2", "from-slave", 60u32)
+        .with_protocol(Protocol::Text);
+    let cache = CacheService::mesh_with_config(config, CacheServiceOptions::default())
         .await
         .unwrap();
-    assert_eq!(
-        ha.get("k2").await.unwrap().unwrap().as_string().unwrap(),
-        "from-slave",
-        "read must be served by the slave tier when L1 misses"
-    );
 
-    // --- double-write populates the slave tier ---
-    let ha_dw = HaClient::connect(config.with_write_slave(true)).unwrap();
-    ha_dw.set("dw", "v", 60u32).await.unwrap();
-    // The slave write runs in a spawned task; poll briefly.
-    let mut replicated = false;
-    for _ in 0..100 {
-        if direct(port_slave).get("dw").await.unwrap().is_some() {
-            replicated = true;
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
-    assert!(replicated, "double-write must reach the slave tier");
-    assert!(direct(port_master).get("dw").await.unwrap().is_some());
-}
-
-/// Direct mode: `DirectClient` speaks to one backend over the pooled engine,
-/// and `Shards` routes keys to a stable backend via the mesh's hash +
-/// distribution algorithms. The unified `Client` enum works over both modes.
-#[tokio::test]
-#[cfg(feature = "direct-mock")]
-async fn direct_mode_and_shards() {
-    use memcache::direct::{DirectClient, ServerConfig, Shards};
-
-    let port_a = spawn(Protocol::Binary).await;
-    let port_b = spawn(Protocol::Binary).await;
-    let client_a =
-        DirectClient::connect(ServerConfig::new(&format!("127.0.0.1:{port_a}")).unwrap()).unwrap();
-    let client_b =
-        DirectClient::connect(ServerConfig::new(&format!("127.0.0.1:{port_b}")).unwrap()).unwrap();
-
-    // Single-backend CRUD through the direct client.
-    assert!(client_a.set("k", "v", 60u32).await.unwrap());
-    assert_eq!(
-        client_a
-            .get("k")
-            .await
-            .unwrap()
-            .unwrap()
-            .as_string()
-            .unwrap(),
-        "v"
-    );
-
-    // Shard routing is stable per key and covers both backends: write
-    // through the router, then confirm each key is present on exactly the
-    // backend the router picked.
-    let shards = Shards::new(
-        "crc32",
-        "modula",
-        vec![format!("127.0.0.1:{port_a}"), format!("127.0.0.1:{port_b}")],
-        vec![client_a.clone(), client_b.clone()],
-    );
-    let keys: Vec<String> = (0..50).map(|i| format!("key:{i}")).collect();
-    let mut used = [false, false];
-    for key in &keys {
-        shards.get_client(key).set(key, "x", 60u32).await.unwrap();
-    }
-    for key in &keys {
-        let on_a = client_a.get(key).await.unwrap().is_some();
-        let on_b = client_b.get(key).await.unwrap().is_some();
-        assert!(on_a ^ on_b, "{key} must live on exactly one backend");
-        used[on_b as usize] = true;
-        // Routing is stable: the router still picks the backend holding the
-        // key (writing through the router and reading directly agree).
-        assert!(
-            shards.get_client(key).get(key).await.unwrap().is_some(),
-            "{key} routed inconsistently"
-        );
-    }
-    assert!(used[0] && used[1], "both backends should receive keys");
-
-    // Write-then-read through the router is consistent.
-    shards
-        .get_client("rk")
-        .set("rk", "rv", 60u32)
-        .await
-        .unwrap();
-    assert_eq!(
-        shards
-            .get_client("rk")
-            .get("rk")
-            .await
-            .unwrap()
-            .unwrap()
-            .as_string()
-            .unwrap(),
-        "rv"
-    );
-
-    // The unified client enum works over either mode.
-    let unified: Client = client_a.into();
-    assert_eq!(
-        unified
-            .get("k")
-            .await
-            .unwrap()
-            .unwrap()
-            .as_string()
-            .unwrap(),
-        "v"
-    );
-    assert!(unified.as_direct().is_some());
-}
-
-/// Spawn a misbehaving binary server: for each connection it answers the
-/// first request normally, then injects one extra unsolicited GET response
-/// frame before answering every subsequent request. This simulates a late
-/// response frame left over from a timed-out operation. Returns the port.
-async fn spawn_desyncing_binary_server() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move {
-        loop {
-            let Ok((mut sock, _)) = listener.accept().await else {
-                break;
-            };
-            tokio::spawn(async move {
-                let mut answered = 0u32;
-                loop {
-                    let mut header = [0u8; 24];
-                    if sock.read_exact(&mut header).await.is_err() {
-                        return;
-                    }
-                    let key_len = u16::from_be_bytes([header[2], header[3]]) as usize;
-                    let extras_len = header[4] as usize;
-                    let body_len =
-                        u32::from_be_bytes([header[8], header[9], header[10], header[11]]) as usize;
-                    let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
-                    let mut body = vec![0u8; body_len];
-                    if sock.read_exact(&mut body).await.is_err() {
-                        return;
-                    }
-                    let _ = (key_len, extras_len);
-                    answered += 1;
-                    if answered > 1 {
-                        // Inject a leftover frame with a bogus opaque.
-                        let junk = frame(0x00, 0x0000, &[0; 4], &[], b"stale", 0xdead, 0);
-                        if sock.write_all(&junk).await.is_err() {
-                            return;
-                        }
-                    }
-                    // Answer every request with a well-formed GET miss.
-                    let response = frame(0x00, 0x0001, &[], &[], b"not found", opaque, 0);
-                    if sock.write_all(&response).await.is_err() {
-                        return;
-                    }
-                    let _ = sock.flush().await;
-                }
-            });
-        }
-    });
-    port
+    assert!(set_when_connected(&cache, "mesh", Bytes::from_static(b"value")).await);
+    assert_eq!(store.lock().await["mesh"].0, b"value");
 }
 
 #[tokio::test]
-async fn binary_desynced_frame_drops_connection() {
-    let port = spawn_desyncing_binary_server().await;
-    let client = SidecarClient::new(
-        Config::tcp("127.0.0.1", port)
-            .with_protocol(Protocol::Binary)
-            .with_max_connections(1),
-    )
-    .unwrap();
-
-    // First request: answered normally, connection goes back to the pool.
-    assert!(client.get("k").await.unwrap().is_none());
-    // Second request on the pooled connection hits the injected stale frame:
-    // the opaque mismatch must surface as a desync error...
-    let err = client.get("k").await.unwrap_err();
-    assert!(
-        matches!(err, memcache::Error::Desynced(_)),
-        "expected desync error, got {err:?}"
-    );
-    // ...and the poisoned connection must have been dropped, so the next
-    // request reconnects and succeeds (fresh connection: answered normally).
-    assert!(client.get("k").await.unwrap().is_none());
-}
-
-#[tokio::test]
-async fn binary_timeout_drops_connection() {
-    use std::time::Duration;
-
-    // Spawn a server that never answers on its first connection (forcing a
-    // timeout) and answers normally on every later connection.
-    async fn spawn_flaky_server() -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            let mut conn_count = 0u32;
-            loop {
-                let Ok((mut sock, _)) = listener.accept().await else {
-                    break;
-                };
-                conn_count += 1;
-                let conn_no = conn_count;
-                tokio::spawn(async move {
-                    loop {
-                        let mut header = [0u8; 24];
-                        if sock.read_exact(&mut header).await.is_err() {
-                            return;
-                        }
-                        let body_len =
-                            u32::from_be_bytes([header[8], header[9], header[10], header[11]])
-                                as usize;
-                        let opaque = u32::from_be_bytes(header[12..16].try_into().unwrap());
-                        let mut body = vec![0u8; body_len];
-                        if sock.read_exact(&mut body).await.is_err() {
-                            return;
-                        }
-                        if conn_no == 1 {
-                            // Never answer on the first connection: force a timeout.
-                            continue;
-                        }
-                        let response = frame(0x00, 0x0001, &[], &[], b"not found", opaque, 0);
-                        if sock.write_all(&response).await.is_err() {
-                            return;
-                        }
-                        let _ = sock.flush().await;
-                    }
-                });
-            }
-        });
-        port
-    }
-
-    let port = spawn_flaky_server().await;
-    let client = SidecarClient::new(
-        Config::tcp("127.0.0.1", port)
-            .with_protocol(Protocol::Binary)
-            .with_max_connections(1)
-            .with_op_timeout(Duration::from_millis(100)),
-    )
-    .unwrap();
-
-    // With the default read retry, the first attempt times out (the first
-    // connection never answers) and the retry is issued on a fresh
-    // connection — which the server answers.
-    assert!(client.get("k").await.unwrap().is_none());
-
-    // With retries disabled, the first request times out; the connection
-    // must be dropped rather than returned to the pool with a
-    // (never-arriving) pending response.
-    let port = spawn_flaky_server().await;
-    let client = SidecarClient::new(
-        Config::tcp("127.0.0.1", port)
-            .with_protocol(Protocol::Binary)
-            .with_max_connections(1)
-            .with_op_timeout(Duration::from_millis(100))
-            .with_read_retries(0),
-    )
-    .unwrap();
-    let err = client.get("k").await.unwrap_err();
-    assert!(
-        matches!(err, memcache::Error::Timeout),
-        "expected timeout, got {err:?}"
-    );
-    // The next request must use a *new* connection (the second one the server
-    // answers) and succeed.
-    assert!(client.get("k").await.unwrap().is_none());
-}
-
-/// After the socks registry starts advertising a different port, the client
-/// must follow it: the old endpoint is drained and requests reach the server
-/// on the new port without a process restart.
-#[tokio::test]
-async fn mesh_rediscovery_follows_port_change() {
+async fn mesh_endpoint_is_fixed_after_construction() {
+    let (first_port, first_store) = spawn_text_server().await;
+    let (second_port, second_store) = spawn_text_server().await;
     let dir = tempfile::tempdir().unwrap();
-    let sock_name =
-        |port: u16| format!("config.example.com+3+config+v1+grp+all:nsX@mc:{port}@cs");
+    let first = dir.path().join(format!(
+        "config.example.com+3+config+v1+grp+all:ns@mc:{first_port}@cs"
+    ));
+    std::fs::write(&first, []).unwrap();
+    let config = MeshConfig::new("ns")
+        .with_group("grp")
+        .with_socket_dir(dir.path())
+        .with_protocol(Protocol::Text);
+    let cache = CacheService::mesh_with_config(config, CacheServiceOptions::default())
+        .await
+        .unwrap();
+    assert!(set_when_connected(&cache, "before", Bytes::from_static(b"one")).await);
 
-    // Initial registry entry points at the first fake server.
-    let port_a = spawn(Protocol::Binary).await;
-    std::fs::write(dir.path().join(sock_name(port_a)), []).unwrap();
-
-    // Disable min-connection maintenance so the test observes the raw
-    // pool drain on endpoint change, not the maintainer refilling it.
-    let client = SidecarClient::from_config(
-        MeshConfig::new("nsX")
-            .with_group("grp")
-            .with_socket_dir(dir.path())
-            .with_min_connections(0),
+    std::fs::remove_file(first).unwrap();
+    std::fs::write(
+        dir.path().join(format!(
+            "config.example.com+3+config+v1+grp+all:ns@mc:{second_port}@cs"
+        )),
+        [],
     )
     .unwrap();
-    assert_eq!(
-        client.current_endpoint(),
-        Endpoint {
-            host: "127.0.0.1".into(),
-            port: port_a
-        }
-    );
-    client.set("k", "v", 60u32).await.unwrap();
-
-    // Mesh reassigns the port: the registry entry now points at a second
-    // server, and the old entry is gone.
-    let port_b = spawn(Protocol::Binary).await;
-    std::fs::remove_file(dir.path().join(sock_name(port_a))).unwrap();
-    std::fs::write(dir.path().join(sock_name(port_b)), []).unwrap();
-
-    // A manual refresh (what the background task does periodically) picks it up.
-    assert!(client.refresh_endpoint().unwrap());
-    assert_eq!(
-        client.current_endpoint(),
-        Endpoint {
-            host: "127.0.0.1".into(),
-            port: port_b
-        }
-    );
-
-    // Requests now hit the new server (the old value is not there). The
-    // first request establishes a fresh connection to the new endpoint.
-    assert!(client.get("k").await.unwrap().is_none());
-    client.set("k", "v2", 60u32).await.unwrap();
-    assert_eq!(
-        client.get("k").await.unwrap().unwrap().as_string().unwrap(),
-        "v2"
-    );
-
-    // Refreshing again without a registry change is a no-op.
-    assert!(!client.refresh_endpoint().unwrap());
-}
-
-/// A `MakeWriter` that appends all log output into a shared buffer.
-#[derive(Clone)]
-struct BufWriter(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for BufWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
-    type Writer = BufWriter;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn logs_error_in_mesh_format_on_request_failure() {
-    use std::time::Duration;
-
-    let buf = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(BufWriter(buf.clone()))
-        .with_ansi(false)
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
-    // Nothing is listening on port 1, so the request fails during connect.
-    let client = SidecarClient::new(
-        Config::tcp("127.0.0.1", 1)
-            .with_namespace("nstest")
-            .with_max_connections(1)
-            .with_connect_timeout(Duration::from_millis(100))
-            .with_op_timeout(Duration::from_millis(100)),
-    )
-    .unwrap();
-
-    let result = client.get("kx").await;
-    assert!(result.is_err());
-
-    let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
     assert!(
-        logged.contains("mc mesh get error ,namespace:nstest ,key: kx"),
-        "unexpected log output: {logged}"
+        cache
+            .set("after", Bytes::from_static(b"two"))
+            .await
+            .unwrap()
     );
+
+    assert!(first_store.lock().await.contains_key("after"));
+    assert!(!second_store.lock().await.contains_key("after"));
+}
+
+#[tokio::test]
+async fn construction_does_not_wait_for_connection() {
+    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = unused.local_addr().unwrap();
+    drop(unused);
+
+    let cache = CacheService::single(endpoint.to_string()).await.unwrap();
+    assert!(matches!(
+        cache.get("not-connected").await,
+        Err(memcache::Error::Unavailable)
+    ));
 }

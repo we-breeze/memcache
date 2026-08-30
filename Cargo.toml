@@ -2,17 +2,15 @@
 name = "memcache"
 version = "0.1.0"
 edition = "2024"
-description = "High-performance, high-availability async memcached client for the example breeze platform (sidecar / direct modes, text + binary protocols)"
+description = "High-performance async memcached CacheService for the example breeze platform"
 license = "MIT"
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
 bytes = "1"
-deadpool = { version = "0.13", features = ["managed", "rt_tokio_1"] }
 thiserror = "2"
 tracing = "0.1"
 arc-swap = "1.9.2"
-socket2 = { version = "0.6.5", features = ["all"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 md5 = "0.7"
@@ -21,36 +19,24 @@ async-trait = "0.1"
 vintage = { path = "../vintage", optional = true }
 futures-util = "0.3.34"
 brz-discovery = { workspace = true }
+brz-net = { package = "net", path = "../net" }
 enum_dispatch = "0.3.8"
+itoa = "1"
 
 [features]
 default = []
-# Expose direct-backend types for tests, mocks, validation, and benchmarks.
-# Direct internals remain compiled for CacheService and service templates.
-direct-mock = []
-# Cache-service templates: `Cacheable`, `ShardedCache`, `MemCacheTemplate`,
-# `MemcacheServiceTemplate`, and the Vintage backup integration, under
-# `memcache::service` (a Rust port of the Java commons-memcache templates).
+# Enable Vintage-backed live cache-service configuration.
 service = ["dep:vintage"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
-tracing-subscriber = "0.3"
-axum = "0.8.4"
-serde_json = "1"
 
-# This crate is itself the SDK (`memcache`) AND the workspace root. The
-# `mc-bench` load-test harness lives under `tools/mc-bench` and is the only
-# other member.
+# This crate is itself the SDK (`memcache`) and the workspace root.
 [workspace]
-members = ["tools/mc-bench"]
+members = []
 resolver = "2"
 
 [workspace.dependencies]
 # Shared Breeze checkout managed by the consuming repository.
 brz-discovery = { package = "discovery", path = "../discovery" }
-# Shared with the redis SDK: the bench harness installs this allocator at
-# its binary composition root to get mimalloc + per-request allocation
-# accounting. The SDK itself stays allocator-agnostic.
-brz-mem = { path = "../redis/memory", version = "0.1.0", default-features = false }

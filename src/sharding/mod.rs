@@ -1,4 +1,4 @@
-//! Hash and distribution algorithms for client-side backend sharding.
+//! Private hash and distribution algorithms used by CacheService sharding.
 //!
 //! Vendored 1:1 from the breeze mesh's `sharding` crate
 //! (`rust/breeze/sharding/src/{hash,distribution}`), so an SDK accessing
@@ -10,6 +10,8 @@
 //! Names come from the resource configuration, e.g. hash `crc32-underscore`,
 //! distribution `modula`, `absmodula`, `ketama`, `range-256`, `modrange`,
 //! `slotmod-1024`, `splitmod-32`, `secmod`.
+
+#![allow(dead_code, unused_imports)]
 
 // Vendored upstream sources keep their original style: they are excluded
 // from this repository's clippy/rustfmt gates so future re-syncs stay

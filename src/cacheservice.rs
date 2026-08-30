@@ -48,7 +48,7 @@ impl CacheServiceConfig {
             serde_yaml::from_str(yaml).map_err(|e| CacheServiceError::Yaml(e.to_string()))?;
         for conf in config.0.values_mut() {
             if let Some(hash) = conf.hash.take() {
-                conf.hash = Some(crate::direct::sharding::normalize_hash_name(&hash).to_string());
+                conf.hash = Some(crate::sharding::normalize_hash_name(&hash).to_string());
             }
         }
         Ok(config)
@@ -80,9 +80,38 @@ pub struct CacheNamespaceConf {
     master_l1: Vec<Vec<String>>,
     #[serde(default, rename = "slave_l1")]
     slave_l1: Vec<Vec<String>>,
+    #[serde(default)]
+    exptime: i64,
+    #[serde(default)]
+    timeout_ms_master: u32,
+    #[serde(default)]
+    timeout_ms_slave: u32,
+    #[serde(default = "default_true")]
+    update_slave_l1: bool,
+    #[serde(default)]
+    local_affinity: bool,
+    #[serde(default)]
+    flag: u64,
 }
 
 impl CacheNamespaceConf {
+    pub(crate) fn single_master(endpoint: String) -> Self {
+        Self {
+            hash: None,
+            distribution: None,
+            master: vec![endpoint],
+            slave: Vec::new(),
+            master_l1: Vec::new(),
+            slave_l1: Vec::new(),
+            exptime: 0,
+            timeout_ms_master: 0,
+            timeout_ms_slave: 0,
+            update_slave_l1: true,
+            local_affinity: false,
+            flag: 0,
+        }
+    }
+
     /// Hashing algorithm (e.g. `crc32`).
     pub fn hash(&self) -> Option<&str> {
         self.hash.as_deref()
@@ -113,6 +142,36 @@ impl CacheNamespaceConf {
     pub fn slave_l1(&self) -> &[Vec<String>] {
         &self.slave_l1
     }
+
+    /// Expiration in milliseconds used when a read hit is written back into
+    /// the first missed replica group.
+    pub fn writeback_expiration_ms(&self) -> i64 {
+        self.exptime
+    }
+
+    pub fn timeout_ms_master(&self) -> u32 {
+        self.timeout_ms_master
+    }
+
+    pub fn timeout_ms_slave(&self) -> u32 {
+        self.timeout_ms_slave
+    }
+
+    pub fn update_slave_l1(&self) -> bool {
+        self.update_slave_l1 || self.flag & (1 << 2) != 0
+    }
+
+    pub fn local_affinity(&self) -> bool {
+        self.local_affinity || self.flag & (1 << 3) != 0
+    }
+
+    pub fn backend_no_storage(&self) -> bool {
+        self.flag & 1 != 0
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Errors returned by cache-service YAML parsing.
@@ -162,11 +221,8 @@ mod tests {
         let ns = cfg.namespace("example-abtest").unwrap();
         // For memcached, `crc32` is rewritten to `crc32-short` at parse
         // time (matching the breeze endpoint's conversion).
-        assert_eq!(ns.hash(), Some(crate::direct::sharding::HASH_CRC32_SHORT));
-        assert_eq!(
-            ns.distribution(),
-            Some(crate::direct::sharding::DIST_MODULA)
-        );
+        assert_eq!(ns.hash(), Some(crate::sharding::HASH_CRC32_SHORT));
+        assert_eq!(ns.distribution(), Some(crate::sharding::DIST_MODULA));
         assert_eq!(
             ns.masters(),
             &[

@@ -75,7 +75,7 @@ fn conf(master: &str) -> CacheNamespaceConf {
 #[tokio::test]
 async fn static_new_builds_from_a_config() {
     // A static CacheService::new just needs a config; the backend is built
-    // lazily (direct clients connect lazily) so no live memcached is required
+    // lazily (physical nodes connect lazily) so no live memcached is required
     // to construct.
     let cache = CacheService::new(conf("127.0.0.1:11211"), CacheServiceOptions::default())
         .await

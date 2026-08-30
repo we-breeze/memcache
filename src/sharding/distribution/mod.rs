@@ -1,5 +1,4 @@
 mod consistent;
-mod dbrange;
 mod modrange;
 mod modula;
 //mod padding;
@@ -9,13 +8,12 @@ mod slotmod;
 mod splitmod;
 
 use consistent::Consistent;
-pub use dbrange::DBRange;
 use modrange::ModRange;
 use modula::Modula;
 //use padding::Padding;
 use self::secmod::SecMod;
 use self::slotmod::SlotMod;
-pub use range::Range;
+use range::Range;
 use splitmod::SplitMod;
 
 #[derive(Clone, Debug)]
