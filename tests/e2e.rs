@@ -178,3 +178,44 @@ async fn construction_does_not_wait_for_connection() {
         Err(memcache::Error::Unavailable)
     ));
 }
+
+#[cfg(feature = "metrics")]
+#[tokio::test]
+async fn metrics_group_physical_accesses_by_port_and_split_direction() {
+    let (port, _) = spawn_text_server().await;
+    let cache = CacheService::single(format!("127.0.0.1:{port}"))
+        .await
+        .unwrap();
+
+    assert!(set_when_connected(&cache, "setup", Bytes::from_static(b"value")).await);
+    assert!(cache.get("setup").await.unwrap().is_some());
+    let before = metric_totals(port);
+
+    assert!(
+        cache
+            .set("measured", Bytes::from_static(b"value"))
+            .await
+            .unwrap()
+    );
+    assert!(cache.get("measured").await.unwrap().is_some());
+    let after = metric_totals(port);
+
+    assert_eq!(after.0 - before.0, 2, "MC counts reads and writes");
+    assert_eq!(after.1 - before.1, 1, "MCDETAIL_up counts writes");
+    assert_eq!(after.2 - before.2, 1, "MCDETAIL_down counts reads");
+}
+
+#[cfg(feature = "metrics")]
+fn metric_totals(port: u16) -> (u64, u64, u64) {
+    let port = port.to_string();
+    let up = format!("{port}_up");
+    let down = format!("{port}_down");
+    let mut totals = (0, 0, 0);
+    brz_metrics::visit(|name, metric_type, snapshot| match metric_type {
+        "MC" if name == port => totals.0 = snapshot.total,
+        "MCDETAIL" if name == up => totals.1 = snapshot.total,
+        "MCDETAIL" if name == down => totals.2 = snapshot.total,
+        _ => {}
+    });
+    totals
+}

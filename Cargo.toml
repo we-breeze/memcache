@@ -20,6 +20,7 @@ vintage = { path = "../vintage", optional = true }
 futures-util = "0.3.34"
 brz-discovery = { workspace = true }
 brz-net = { package = "net", path = "../net" }
+brz-metrics = { package = "metrics", path = "../metrics", optional = true }
 enum_dispatch = "0.3.8"
 itoa = "1"
 
@@ -27,6 +28,8 @@ itoa = "1"
 default = []
 # Enable Vintage-backed live cache-service configuration.
 service = ["dep:vintage"]
+# Emit ProfileUtil-compatible MC and MCDETAIL physical-access metrics.
+metrics = ["dep:brz-metrics"]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

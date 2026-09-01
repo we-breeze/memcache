@@ -222,6 +222,7 @@ impl CacheServiceOptions {
 /// Sized production/test dispatch stored behind the COW topology snapshot.
 /// The production hot path is concrete; dynamic dispatch only exists in unit
 /// tests that inject a recording backend.
+#[cfg_attr(test, allow(clippy::large_enum_variant))]
 pub(crate) enum BackendSlot {
     Net(CacheTopology),
     #[cfg(test)]

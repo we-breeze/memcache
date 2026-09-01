@@ -15,6 +15,8 @@ use brz_net::{Node, NodeOptions, QuotaBalancerOptions, QuotaSelector, QuotaTicke
 use futures_util::future::join_all;
 use rand::{Rng, seq::SliceRandom};
 
+#[cfg(feature = "metrics")]
+use crate::profile_metrics::{Direction, ProfileMetrics};
 use crate::{
     CacheNamespaceConf, CacheServiceOptions, Error, Expiration, Protocol, Result,
     service::Cacheable,
@@ -99,6 +101,8 @@ pub(crate) struct CacheTopology {
     writeback_expiration: Expiration,
     backend_no_storage: bool,
     nodes: HashMap<NodeKey, Node<MemcacheProtocol>>,
+    #[cfg(feature = "metrics")]
+    profile_metrics: ProfileMetrics,
 }
 
 impl std::fmt::Debug for CacheTopology {
@@ -125,6 +129,8 @@ impl CacheTopology {
         let slave_timeout = configured_timeout(conf.timeout_ms_slave(), options.slave_timeout);
         let mut nodes = HashMap::new();
         let mut groups = Vec::with_capacity(specs.len());
+        #[cfg(feature = "metrics")]
+        let mut profile_port = None;
 
         for (group_index, endpoints) in specs.iter().enumerate() {
             let timeout = if group_index == 0 {
@@ -140,6 +146,10 @@ impl CacheTopology {
                         "CacheService backend must be an IPv4 socket address: {endpoint}"
                     ))
                 })?;
+                #[cfg(feature = "metrics")]
+                if profile_port.is_none() {
+                    profile_port = Some(endpoint.port());
+                }
                 let key = NodeKey {
                     group: group_key.clone(),
                     shard_index,
@@ -197,6 +207,10 @@ impl CacheTopology {
         let writeback_ms = conf.writeback_expiration_ms().max(0) as u64;
         let writeback_expiration =
             Expiration::from((writeback_ms / 1_000).min(u64::from(u32::MAX)) as u32);
+        #[cfg(feature = "metrics")]
+        let profile_metrics = ProfileMetrics::new(
+            profile_port.expect("validated cache-service master group has one endpoint"),
+        );
         Ok(Self {
             groups: groups.into(),
             local_len,
@@ -205,7 +219,20 @@ impl CacheTopology {
             writeback_expiration,
             backend_no_storage: conf.backend_no_storage(),
             nodes,
+            #[cfg(feature = "metrics")]
+            profile_metrics,
         })
+    }
+
+    #[cfg(feature = "metrics")]
+    #[inline]
+    fn attach_profile(&self, request: MemcacheRequest) -> MemcacheRequest {
+        let direction = if request.is_read() {
+            Direction::Down
+        } else {
+            Direction::Up
+        };
+        request.with_profile_attempt(self.profile_metrics.attempt(direction))
     }
 
     async fn request_at(
@@ -215,6 +242,8 @@ impl CacheTopology {
         request: MemcacheRequest,
         quota: Option<QuotaTicket>,
     ) -> Result<MemcacheResponse> {
+        #[cfg(feature = "metrics")]
+        let request = self.attach_profile(request);
         let future = match self.groups[group_index].node(key).request(request) {
             Ok(future) => future,
             Err(error) => {
@@ -302,6 +331,8 @@ impl CacheTopology {
         // Dropping the future does not cancel the admitted request. The node
         // continues decoding its response and releases the completion slot,
         // avoiding one spawned task per propagated write.
+        #[cfg(feature = "metrics")]
+        let request = self.attach_profile(request);
         let _ = self.groups[group_index].node(key).request(request);
     }
 
