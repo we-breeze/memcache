@@ -17,6 +17,8 @@ pub mod value;
 mod api;
 mod cache_topology;
 mod mesh;
+#[cfg(feature = "metrics")]
+mod profile_metrics;
 mod service;
 mod session_protocol;
 mod sharding;

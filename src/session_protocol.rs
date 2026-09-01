@@ -10,6 +10,8 @@ use brz_net::{
 };
 use bytes::Bytes;
 
+#[cfg(feature = "metrics")]
+use crate::profile_metrics::ProfileAttempt;
 use crate::{Error, Expiration, Protocol, Result, value::CasValue, value::Value};
 
 const REQUEST_MAGIC: u8 = 0x80;
@@ -62,13 +64,29 @@ impl Operation {
 }
 
 /// Unserialized request retained until the node has admitted it.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct MemcacheRequest {
     operation: Operation,
     key: Bytes,
     value: Option<Value>,
     expiration: Expiration,
     cas: u64,
+    #[cfg(feature = "metrics")]
+    profile_attempt: Option<ProfileAttempt>,
+}
+
+impl Clone for MemcacheRequest {
+    fn clone(&self) -> Self {
+        Self {
+            operation: self.operation,
+            key: self.key.clone(),
+            value: self.value.clone(),
+            expiration: self.expiration,
+            cas: self.cas,
+            #[cfg(feature = "metrics")]
+            profile_attempt: None,
+        }
+    }
 }
 
 impl MemcacheRequest {
@@ -103,6 +121,8 @@ impl MemcacheRequest {
             value: None,
             expiration: Expiration::Never,
             cas: 0,
+            #[cfg(feature = "metrics")]
+            profile_attempt: None,
         }
     }
 
@@ -119,7 +139,20 @@ impl MemcacheRequest {
             value: Some(value),
             expiration,
             cas,
+            #[cfg(feature = "metrics")]
+            profile_attempt: None,
         }
+    }
+
+    #[cfg(feature = "metrics")]
+    pub(crate) fn is_read(&self) -> bool {
+        self.operation.is_get()
+    }
+
+    #[cfg(feature = "metrics")]
+    pub(crate) fn with_profile_attempt(mut self, attempt: ProfileAttempt) -> Self {
+        self.profile_attempt = Some(attempt);
+        self
     }
 
     /// reference_client converts store propagation to unconditional SET and clears
@@ -217,9 +250,33 @@ impl SessionProtocol for MemcacheProtocol {
     }
 }
 
+struct PendingRequest {
+    operation: Operation,
+    #[cfg(feature = "metrics")]
+    profile_attempt: Option<ProfileAttempt>,
+}
+
+impl PendingRequest {
+    fn take_from(request: &mut MemcacheRequest) -> Self {
+        Self {
+            operation: request.operation,
+            #[cfg(feature = "metrics")]
+            profile_attempt: request.profile_attempt.take(),
+        }
+    }
+
+    #[inline]
+    fn finish(&mut self) {
+        #[cfg(feature = "metrics")]
+        if let Some(attempt) = &mut self.profile_attempt {
+            attempt.finish(true);
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct TextCodec {
-    pending: VecDeque<Operation>,
+    pending: VecDeque<PendingRequest>,
 }
 
 impl TextCodec {
@@ -227,10 +284,11 @@ impl TextCodec {
         self.pending.clear();
     }
 
-    fn encode(&mut self, request: MemcacheRequest) -> Result<EphemeralBytes> {
+    fn encode(&mut self, mut request: MemcacheRequest) -> Result<EphemeralBytes> {
         validate_key(&request.key)?;
         let frame = encode_text(&request)?;
-        self.pending.push_back(request.operation);
+        self.pending
+            .push_back(PendingRequest::take_from(&mut request));
         Ok(frame)
     }
 
@@ -238,7 +296,7 @@ impl TextCodec {
         &mut self,
         source: &mut RxBuffer,
     ) -> Result<Option<DecodedResponse<MemcacheResponse>>> {
-        let Some(operation) = self.pending.front().copied() else {
+        let Some(operation) = self.pending.front().map(|pending| pending.operation) else {
             return if source.is_empty() {
                 Ok(None)
             } else {
@@ -248,18 +306,20 @@ impl TextCodec {
         let Some((layout, consumed)) = scan_text(source, operation)? else {
             return Ok(None);
         };
-        self.pending.pop_front();
+        let mut pending = self
+            .pending
+            .pop_front()
+            .expect("front pending request must still exist");
         let frame = source.take(consumed);
-        Ok(Some(DecodedResponse::fifo(materialize_text(
-            frame, layout, operation,
-        )?)))
+        let response = materialize_text(frame, layout, operation)?;
+        pending.finish();
+        Ok(Some(DecodedResponse::fifo(response)))
     }
 }
 
-#[derive(Clone, Copy)]
 struct BinaryPending {
     token: RequestToken,
-    operation: Operation,
+    request: PendingRequest,
 }
 
 pub(crate) struct BinaryCodec {
@@ -271,17 +331,23 @@ pub(crate) struct BinaryCodec {
 impl Default for BinaryCodec {
     fn default() -> Self {
         Self {
-            pending: Box::new([None; 256]),
+            pending: Box::new(std::array::from_fn(|_| None)),
         }
     }
 }
 
 impl BinaryCodec {
     fn reset(&mut self) {
-        self.pending.fill(None);
+        for pending in self.pending.iter_mut() {
+            *pending = None;
+        }
     }
 
-    fn encode(&mut self, request: MemcacheRequest, token: RequestToken) -> Result<EphemeralBytes> {
+    fn encode(
+        &mut self,
+        mut request: MemcacheRequest,
+        token: RequestToken,
+    ) -> Result<EphemeralBytes> {
         validate_key(&request.key)?;
         let index = token.index();
         if self.pending[index].is_some() {
@@ -290,7 +356,7 @@ impl BinaryCodec {
         let frame = encode_binary(&request, index as u32)?;
         self.pending[index] = Some(BinaryPending {
             token,
-            operation: request.operation,
+            request: PendingRequest::take_from(&mut request),
         });
         Ok(frame)
     }
@@ -323,7 +389,7 @@ impl BinaryCodec {
             .and_then(Option::take)
             .ok_or_else(|| protocol_error("binary response opaque has no pending request"))?;
         let opcode = source.byte(1).expect("complete binary header");
-        if opcode != pending.operation.binary_opcode() {
+        if opcode != pending.request.operation.binary_opcode() {
             return Err(protocol_error(
                 "binary response opcode does not match request",
             ));
@@ -341,12 +407,14 @@ impl BinaryCodec {
         let value_start = body_start + extras_len + key_len;
         let value = frame.slice(value_start..consumed);
         let response = materialize_binary(
-            pending.operation,
+            pending.request.operation,
             status,
             cas,
             &frame[body_start..body_start + extras_len],
             value,
         )?;
+        let mut request = pending.request;
+        request.finish();
         Ok(Some(DecodedResponse {
             correlation: Correlation::Tagged(pending.token),
             response,
