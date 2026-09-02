@@ -16,11 +16,11 @@ serde_yaml = "0.9"
 md5 = "0.7"
 rand = "0.8"
 async-trait = "0.1"
-vintage = { path = "../vintage", optional = true }
+vintage = { git = "https://github.com/we-breeze/vintage.git", tag = "v0.0.1", optional = true }
 futures-util = "0.3.34"
 brz-discovery = { workspace = true }
-brz-net = { package = "net", path = "../net" }
-brz-metrics = { package = "metrics", path = "../metrics", optional = true }
+brz-net = { package = "net", git = "https://github.com/we-breeze/net.git", tag = "v0.0.1" }
+brz-metrics = { package = "metrics", git = "https://github.com/we-breeze/metrics.git", tag = "v0.0.1", optional = true }
 enum_dispatch = "0.3.8"
 itoa = "1"
 
@@ -41,5 +41,5 @@ members = []
 resolver = "2"
 
 [workspace.dependencies]
-# Shared Breeze checkout managed by the consuming repository.
-brz-discovery = { package = "discovery", path = "../discovery" }
+# Shared Breeze libraries use the same release tag across repositories.
+brz-discovery = { package = "discovery", git = "https://github.com/we-breeze/discovery.git", tag = "v0.0.1" }

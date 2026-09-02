@@ -150,6 +150,7 @@ checksum = "61803da095bee82a81bb1a452ecc25d3b2f1416d1897eb86430c6159ef717c17"
 [[package]]
 name = "discovery"
 version = "0.1.0"
+source = "git+https://github.com/we-breeze/discovery.git?tag=v0.0.1#a88d869dc1d099ce2473415ecf1414495fde8495"
 
 [[package]]
 name = "displaydoc"
@@ -165,6 +166,7 @@ dependencies = [
 [[package]]
 name = "ds"
 version = "0.1.0"
+source = "git+https://github.com/we-breeze/ds.git?tag=v0.0.1#cfb71d3c9873cda51f708a35164369b9bea36ae9"
 dependencies = [
  "crossbeam-utils",
  "mimalloc",
@@ -660,10 +662,11 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "metrics"
 version = "0.1.0"
+source = "git+https://github.com/we-breeze/metrics.git?tag=v0.0.1#e956b92f41166c1c21c74becad23437a8f87868c"
 dependencies = [
  "ahash",
+ "arc-swap",
  "chrono",
- "ds",
 ]
 
 [[package]]
@@ -689,6 +692,7 @@ dependencies = [
 [[package]]
 name = "net"
 version = "0.1.0"
+source = "git+https://github.com/we-breeze/net.git?tag=v0.0.1#8bcc42d14408bef8f8ce818c0f9fe7e2d1cacaa6"
 dependencies = [
  "arc-swap",
  "atomic-waker",
@@ -1440,6 +1444,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vintage"
 version = "0.1.0"
+source = "git+https://github.com/we-breeze/vintage.git?tag=v0.0.1#c51240d535cc43c101a34201acf4792107c525b7"
 dependencies = [
  "arc-swap",
  "bytes",
