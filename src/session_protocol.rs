@@ -155,7 +155,7 @@ impl MemcacheRequest {
         self
     }
 
-    /// reference_client converts store propagation to unconditional SET and clears
+    /// reference client converts store propagation to unconditional SET and clears
     /// CAS; delete propagation remains delete.
     pub(crate) fn fanout(&self) -> Self {
         let mut request = self.clone();
@@ -177,7 +177,7 @@ impl MemcacheRequest {
 pub(crate) struct WriteResponse {
     /// The exact result returned to the caller.
     pub(crate) result: Result<bool>,
-    /// Whether reference_client considers this response successful for write fanout.
+    /// Whether reference client considers this response successful for write fanout.
     pub(crate) fanout: bool,
     /// Whether a non-OK response may use the one configured foreground retry.
     pub(crate) retryable: bool,

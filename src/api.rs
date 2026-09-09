@@ -8,7 +8,6 @@ use bytes::Bytes;
 
 use crate::cache_topology::CacheTopology;
 use crate::cacheservice::CacheNamespaceConf;
-use crate::mesh::MeshConfig;
 use crate::service::Cacheable;
 use crate::value::Value;
 use crate::{Expiration, Protocol, Result};
@@ -78,11 +77,7 @@ pub trait Memcache: Send + Sync {
 /// does **not** poll: the source detects changes and pushes them by invoking
 /// the `on_update` callback registered via [`CacheServiceConfigSource::subscribe`].
 ///
-/// This trait is feature-independent so `CacheService` can be tested and driven
-/// by any source (in-process fakes, file watchers, Vintage, …) without the
-/// `service` feature. The Vintage adapter (`service::vintage_live`) is one
-/// implementation; `CacheService::from_vintage` is a convenience constructor
-/// for it.
+/// Implement this interface in the application for configuration loading and updates.
 #[async_trait]
 pub trait CacheServiceConfigSource: Send + Sync {
     /// Loads the initial namespace configuration. Called once at construction.
@@ -91,7 +86,10 @@ pub trait CacheServiceConfigSource: Send + Sync {
     /// Subscribes to subsequent changes. The source invokes `on_update`
     /// whenever the namespace configuration changes; `CacheService` never
     /// polls. Dropping the returned [`SubscriptionHandle`] cancels the
-    /// subscription (and stops any source-internal polling/listening).
+    /// subscription (and releases its polling/listening resources).
+    /// Replay current state when registering to cover changes after `load`,
+    /// then deliver updates in source order. Shared polling may continue while
+    /// other subscribers remain.
     async fn subscribe(
         &self,
         on_update: Arc<dyn Fn(CacheNamespaceConf) + Send + Sync>,
@@ -139,8 +137,6 @@ pub struct CacheServiceOptions {
     pub default_expiration: Expiration,
     /// Wire protocol used by the topology built by [`CacheService`].
     ///
-    /// This does not override the protocol of an explicitly supplied
-    /// [`crate::MeshConfig`].
     pub protocol: Protocol,
     /// Fallback master request timeout when the namespace does not override it.
     pub master_timeout: Duration,
@@ -246,7 +242,6 @@ impl BackendSlot {
         }
     }
 
-    #[cfg(feature = "service")]
     pub(crate) fn topology(&self) -> Option<&CacheTopology> {
         match self {
             Self::Net(topology) => Some(topology),
@@ -259,7 +254,7 @@ impl BackendSlot {
 /// A CacheService-backed [`Memcache`] implementation.
 ///
 /// This is the stable application facade. Its production backend mirrors the
-/// reference_client master/master-L1/slave/slave-L1 topology over one persistent
+/// reference client master/master-L1/slave/slave-L1 topology over one persistent
 /// `brz-net` session per physical node.
 ///
 /// The backend lives behind an `ArcSwapAny` so it can be hot-swapped at
@@ -277,39 +272,6 @@ pub struct CacheService {
 }
 
 impl CacheService {
-    /// Connects to a mesh-managed cache identified by `group` and `namespace`.
-    ///
-    /// The local breeze sidecar owns backend sharding and failover. This
-    /// discovers its TCP port once, then builds the same fixed single-node
-    /// topology as [`CacheService::single`].
-    pub async fn mesh(group: impl Into<String>, namespace: impl Into<String>) -> Result<Self> {
-        Self::mesh_with_options(group, namespace, CacheServiceOptions::default()).await
-    }
-
-    /// Connects to a mesh-managed cache with explicit application options.
-    pub async fn mesh_with_options(
-        group: impl Into<String>,
-        namespace: impl Into<String>,
-        options: CacheServiceOptions,
-    ) -> Result<Self> {
-        let config = MeshConfig::new(namespace).with_group(group);
-        Self::mesh_with_config(config, options).await
-    }
-
-    /// Connects using explicit mesh discovery, protocol, and timeout settings.
-    pub async fn mesh_with_config(
-        config: MeshConfig,
-        mut options: CacheServiceOptions,
-    ) -> Result<Self> {
-        let endpoint = config.resolve()?;
-        options.protocol = config.protocol;
-        options.connect_timeout = config.connect_timeout;
-        options.master_timeout = config.op_timeout;
-        options.slave_timeout = config.op_timeout;
-
-        Self::single_with_options(format!("{}:{}", endpoint.host, endpoint.port), options).await
-    }
-
     /// Builds one unsharded master endpoint using CacheService defaults.
     ///
     /// The resulting topology contains exactly one replica group, one shard,
@@ -342,9 +304,7 @@ impl CacheService {
     /// configuration. `source` drives the cache — `CacheService` itself never
     /// polls. The initial configuration is loaded once at construction.
     ///
-    /// Use this with a custom [`CacheServiceConfigSource`] implementation; for
-    /// the common Vintage case prefer [`CacheService::from_vintage`].
-    #[cfg(feature = "service")]
+    /// Use this with an application-owned [`CacheServiceConfigSource`].
     pub async fn new_live(
         source: Arc<dyn CacheServiceConfigSource>,
         options: CacheServiceOptions,
@@ -353,12 +313,8 @@ impl CacheService {
         let backend = Self::build_backend(&initial, options, None)?;
         let backend_slot = Arc::new(ArcSwapAny::new(Arc::new(backend)));
 
-        let inner = crate::service::vintage_live::CacheServiceInner::new(
-            /* namespace placeholder */ "",
-            initial,
-            backend_slot.clone(),
-            options,
-        );
+        let inner =
+            crate::service::live::CacheServiceInner::new(initial, backend_slot.clone(), options);
         let inner_for_cb = inner.clone();
         let on_update: Arc<dyn Fn(CacheNamespaceConf) + Send + Sync> = Arc::new(move |conf| {
             if let Err(error) = inner_for_cb.apply(conf) {
@@ -385,28 +341,6 @@ impl CacheService {
                 _inner: inner,
             })),
         })
-    }
-
-    /// Builds a cache whose backend hot-swaps when the Vintage statics-config
-    /// `group`/`namespace` changes.
-    ///
-    /// This is the public live-construction entry point. It subscribes to the
-    /// Vintage group (one shared poll per group), and the backend is rebuilt
-    /// and atomically swapped in whenever this namespace's config changes;
-    /// unrelated namespace changes are ignored. `CacheService` itself never
-    /// polls — Vintage pushes updates. The driver is held alive for the
-    /// lifetime of the returned `CacheService`.
-    #[cfg(feature = "service")]
-    pub async fn from_vintage(
-        client: vintage::Client,
-        group: impl Into<String>,
-        namespace: impl Into<String>,
-        options: CacheServiceOptions,
-    ) -> Result<Self> {
-        let source = crate::service::vintage_live::VintageCacheServiceConfigSource::new(
-            client, group, namespace,
-        );
-        Self::new_live(Arc::new(source), options).await
     }
 
     pub(crate) fn build_backend(
@@ -438,14 +372,12 @@ impl CacheService {
 
 /// Keeps a live-value subscription and its applying inner alive while any
 /// `CacheService` clone references them.
-#[cfg(feature = "service")]
 struct LiveHold {
     _source: Arc<dyn CacheServiceConfigSource>,
     _handle: SubscriptionHandle,
-    _inner: Arc<crate::service::vintage_live::CacheServiceInner>,
+    _inner: Arc<crate::service::live::CacheServiceInner>,
 }
 
-#[cfg(feature = "service")]
 impl std::fmt::Debug for LiveHold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveHold").finish_non_exhaustive()

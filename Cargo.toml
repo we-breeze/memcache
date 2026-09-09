@@ -1,9 +1,11 @@
 [package]
-name = "memcache"
+name = "brz-memcache"
 version = "0.1.0"
 edition = "2024"
-description = "High-performance async memcached CacheService for the example breeze platform"
-license = "MIT"
+description = "Asynchronous memcached client with sharding, failover, and live configuration"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/we-breeze/memcache"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["net", "io-util", "sync", "time", "macros", "rt-multi-thread"] }
@@ -16,18 +18,16 @@ serde_yaml = "0.9"
 md5 = "0.7"
 rand = "0.8"
 async-trait = "0.1"
-vintage = { git = "https://github.com/we-breeze/vintage.git", tag = "v0.0.1", optional = true }
 futures-util = "0.3.34"
-brz-discovery = { workspace = true }
-brz-net = { package = "net", git = "https://github.com/we-breeze/net.git", tag = "v0.0.1" }
-brz-metrics = { package = "metrics", git = "https://github.com/we-breeze/metrics.git", tag = "v0.0.2", optional = true }
+brz-net = { package = "brz-net", version = "0.0.2" }
+brz-metrics = { package = "brz-metrics", version = "0.0.3", optional = true }
 enum_dispatch = "0.3.8"
 itoa = "1"
 
 [features]
 default = []
-# Enable Vintage-backed live cache-service configuration.
-service = ["dep:vintage"]
+# Compatibility feature; live configuration is now available by default.
+service = []
 # Emit ProfileUtil-compatible MC and MCDETAIL physical-access metrics.
 metrics = ["dep:brz-metrics"]
 
@@ -40,6 +40,6 @@ tempfile = "3"
 members = []
 resolver = "2"
 
-[workspace.dependencies]
-# Shared Breeze libraries use the same release tag across repositories.
-brz-discovery = { package = "discovery", git = "https://github.com/we-breeze/discovery.git", tag = "v0.0.1" }
+
+[lib]
+name = "memcache"

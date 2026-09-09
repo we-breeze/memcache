@@ -1,7 +1,4 @@
-//! Internal operation contract and optional Vintage live-config adapter.
-
+//! Internal operations and source-independent live configuration.
 mod cacheable;
-#[cfg(feature = "service")]
-pub(crate) mod vintage_live;
-
+pub(crate) mod live;
 pub(crate) use cacheable::Cacheable;

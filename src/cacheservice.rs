@@ -1,30 +1,4 @@
-//! Cache-service configuration: parse the Vintage statics-config YAML that
-//! describes a memcached cache pool, and extract the master list for a
-//! namespace.
-//!
-//! The source service's `mcClient` bean (`example:cstemplate`) reads user info
-//! from the `example-abtest` namespace of a vintage-configured cache pool. At
-//! startup a Vintage `/1/config/service?action=lookup&group=<group>` call
-//! returns a YAML document whose top-level keys are cache namespaces; each
-//! namespace block carries a `master:` list of `host:port` endpoints (plus
-//! `slave_l1:`, `hash:`, `distribution:`, ...). This module parses that YAML
-//! and exposes the selected namespace to `CacheService::new`.
-//!
-//! This module only parses YAML strings — it does not talk to Vintage. The
-//! caller obtains the YAML value (the `key="all"` entry of the
-//! `StaticsConfigSnapshot`) from the Vintage client and passes it here. This
-//! keeps the YAML model and the HTTP transport in separate crates.
-//!
-//! # Example
-//!
-//! ```
-//! use memcache::cacheservice::CacheServiceConfig;
-//!
-//! let yaml = "example-abtest:\n  hash: crc32\n  distribution: modula\n  master:\n  - 192.0.2.30:15138\n  - 192.0.2.27:15138\n";
-//! let cfg = CacheServiceConfig::from_yaml_str(yaml).unwrap();
-//! let masters = cfg.masters_of("example-abtest").unwrap();
-//! assert_eq!(masters, &["192.0.2.30:15138".to_string(), "192.0.2.27:15138".to_string()]);
-//! ```
+//! Application-supplied cache topology and native configuration parsing.
 
 use std::collections::HashMap;
 
@@ -36,22 +10,9 @@ use serde::Deserialize;
 pub struct CacheServiceConfig(HashMap<String, CacheNamespaceConf>);
 
 impl CacheServiceConfig {
-    /// Parses a cache-service YAML document (the `key="all"` value from a
-    /// Vintage statics-config lookup response).
-    ///
-    /// Like the breeze endpoint's cacheservice config, a namespace hash of
-    /// plain `crc32` is rewritten to `crc32-short`: for memcached the two
-    /// are the same algorithm and the mesh routes with the short variant
-    /// (`(crc32 >> 16) & 0x7fff`), so clients must too.
+    /// Parse native cache configuration without legacy format conversions.
     pub fn from_yaml_str(yaml: &str) -> Result<Self, CacheServiceError> {
-        let mut config: Self =
-            serde_yaml::from_str(yaml).map_err(|e| CacheServiceError::Yaml(e.to_string()))?;
-        for conf in config.0.values_mut() {
-            if let Some(hash) = conf.hash.take() {
-                conf.hash = Some(crate::sharding::normalize_hash_name(&hash).to_string());
-            }
-        }
-        Ok(config)
+        serde_yaml::from_str(yaml).map_err(|e| CacheServiceError::Yaml(e.to_string()))
     }
 
     /// Returns the master list for the given namespace, if present.
@@ -69,33 +30,33 @@ impl CacheServiceConfig {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct CacheNamespaceConf {
     #[serde(default)]
-    hash: Option<String>,
+    pub hash: Option<String>,
     #[serde(default)]
-    distribution: Option<String>,
+    pub distribution: Option<String>,
     #[serde(default)]
-    master: Vec<String>,
+    pub master: Vec<String>,
     #[serde(default)]
-    slave: Vec<String>,
+    pub slave: Vec<String>,
     #[serde(default, rename = "master_l1")]
-    master_l1: Vec<Vec<String>>,
+    pub master_l1: Vec<Vec<String>>,
     #[serde(default, rename = "slave_l1")]
-    slave_l1: Vec<Vec<String>>,
+    pub slave_l1: Vec<Vec<String>>,
     #[serde(default)]
-    exptime: i64,
+    pub exptime: i64,
     #[serde(default)]
-    timeout_ms_master: u32,
+    pub timeout_ms_master: u32,
     #[serde(default)]
-    timeout_ms_slave: u32,
+    pub timeout_ms_slave: u32,
     #[serde(default = "default_true")]
-    update_slave_l1: bool,
+    pub update_slave_l1: bool,
     #[serde(default)]
-    local_affinity: bool,
+    pub local_affinity: bool,
     #[serde(default)]
-    flag: u64,
+    pub backend_no_storage: bool,
 }
 
 impl CacheNamespaceConf {
-    pub(crate) fn single_master(endpoint: String) -> Self {
+    pub fn single_master(endpoint: String) -> Self {
         Self {
             hash: None,
             distribution: None,
@@ -108,7 +69,7 @@ impl CacheNamespaceConf {
             timeout_ms_slave: 0,
             update_slave_l1: true,
             local_affinity: false,
-            flag: 0,
+            backend_no_storage: false,
         }
     }
 
@@ -158,15 +119,15 @@ impl CacheNamespaceConf {
     }
 
     pub fn update_slave_l1(&self) -> bool {
-        self.update_slave_l1 || self.flag & (1 << 2) != 0
+        self.update_slave_l1
     }
 
     pub fn local_affinity(&self) -> bool {
-        self.local_affinity || self.flag & (1 << 3) != 0
+        self.local_affinity
     }
 
     pub fn backend_no_storage(&self) -> bool {
-        self.flag & 1 != 0
+        self.backend_no_storage
     }
 }
 
@@ -213,29 +174,28 @@ pub fn masters_from_yaml(yaml: &str, namespace: &str) -> Result<Vec<String>, Cac
 mod tests {
     use super::*;
 
-    const SAMPLE_YAML: &str = "example-abtest:\n  hash: crc32\n  distribution: modula\n  hash_tag: example-abtest\n  master:\n  - 192.0.2.30:15138\n  - 192.0.2.27:15138\n  - 192.0.2.25:15138\n  - 192.0.2.26:15138\n  slave_l1:\n  - - 192.0.2.28:15138\n    - 192.0.2.29:15138\n";
+    const SAMPLE_YAML: &str = "example-abtest:\n  hash: crc32\n  distribution: modula\n  hash_tag: example-abtest\n  master:\n  - 192.0.4.103:15138\n  - 192.0.0.95:15138\n  - 192.0.0.131:15138\n  - 192.0.0.209:15138\n  slave_l1:\n  - - 192.0.2.203:15138\n    - 192.0.2.204:15138\n";
 
     #[test]
     fn parses_cache_service_yaml_namespace() {
         let cfg = CacheServiceConfig::from_yaml_str(SAMPLE_YAML).unwrap();
         let ns = cfg.namespace("example-abtest").unwrap();
-        // For memcached, `crc32` is rewritten to `crc32-short` at parse
-        // time (matching the breeze endpoint's conversion).
-        assert_eq!(ns.hash(), Some(crate::sharding::HASH_CRC32_SHORT));
+        // Native configuration preserves the explicitly supplied hash name.
+        assert_eq!(ns.hash(), Some("crc32"));
         assert_eq!(ns.distribution(), Some(crate::sharding::DIST_MODULA));
         assert_eq!(
             ns.masters(),
             &[
-                "192.0.2.30:15138",
-                "192.0.2.27:15138",
-                "192.0.2.25:15138",
-                "192.0.2.26:15138",
+                "192.0.4.103:15138",
+                "192.0.0.95:15138",
+                "192.0.0.131:15138",
+                "192.0.0.209:15138",
             ]
         );
         assert_eq!(ns.slave_l1().len(), 1);
         assert_eq!(
             ns.slave_l1()[0],
-            &["192.0.2.28:15138", "192.0.2.29:15138"]
+            &["192.0.2.203:15138", "192.0.2.204:15138"]
         );
     }
 
@@ -251,10 +211,10 @@ mod tests {
         assert_eq!(
             masters,
             vec![
-                "192.0.2.30:15138",
-                "192.0.2.27:15138",
-                "192.0.2.25:15138",
-                "192.0.2.26:15138",
+                "192.0.4.103:15138",
+                "192.0.0.95:15138",
+                "192.0.0.131:15138",
+                "192.0.0.209:15138",
             ]
         );
     }

@@ -1,4 +1,4 @@
-//! reference_client-compatible CacheService topology over `brz-net` sessions.
+//! reference client-compatible CacheService topology over `brz-net` sessions.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -83,7 +83,7 @@ impl ReadSelector {
                 }
             }
             Self::Batched { cursor, replicas } => ReadSelection {
-                // This intentionally matches reference_client: one group is retained
+                // This intentionally matches reference client: one group is retained
                 // for 1024 requests when local-affinity quota mode is off.
                 index: (cursor.fetch_add(1, Ordering::Relaxed) >> 10) % replicas,
                 quota: None,
@@ -196,7 +196,7 @@ impl CacheTopology {
                 .map_err(|error| Error::Client(error.to_string()))?,
             )
         } else {
-            // reference_client stores the random group index directly, then applies
+            // reference client stores the random group index directly, then applies
             // `fetch_add >> 10`; preserve that established behavior.
             ReadSelector::Batched {
                 cursor: AtomicUsize::new(initial),
@@ -540,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn namespace_timeouts_are_clamped_like_reference_client() {
+    fn namespace_timeouts_are_clamped() {
         assert_eq!(
             configured_timeout(1, Duration::from_secs(1)),
             Duration::from_millis(20)

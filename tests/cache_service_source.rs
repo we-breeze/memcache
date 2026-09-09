@@ -4,8 +4,6 @@
 //! These verify the push model: the source calls `on_update` and the
 //! `CacheService` backend hot-swaps. `CacheService` never polls.
 
-#![cfg(feature = "service")]
-
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;

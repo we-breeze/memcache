@@ -15,10 +15,6 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[source] io::Error),
 
-    /// Could not locate a mesh endpoint in the socks registry directory.
-    #[error("mesh discovery: {0}")]
-    MeshDiscovery(String),
-
     /// An operation exceeded the configured timeout.
     #[error("operation timed out")]
     Timeout,
