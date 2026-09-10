@@ -7,8 +7,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use memcache::cacheservice::CacheServiceConfig;
-use memcache::{
+use brz_memcache::cacheservice::CacheServiceConfig;
+use brz_memcache::{
     CacheNamespaceConf, CacheService, CacheServiceConfigSource, CacheServiceOptions,
     SubscriptionHandle,
 };
@@ -48,14 +48,14 @@ thread_local! {
 
 #[async_trait]
 impl CacheServiceConfigSource for FakeSource {
-    async fn load(&self) -> Result<CacheNamespaceConf, memcache::Error> {
+    async fn load(&self) -> Result<CacheNamespaceConf, brz_memcache::Error> {
         Ok(conf("127.0.0.1:11211"))
     }
 
     async fn subscribe(
         &self,
         on_update: Arc<dyn Fn(CacheNamespaceConf) + Send + Sync>,
-    ) -> Result<SubscriptionHandle, memcache::Error> {
+    ) -> Result<SubscriptionHandle, brz_memcache::Error> {
         CALLBACK.with(|cell| *cell.borrow_mut() = Some(on_update));
         Ok(SubscriptionHandle::empty())
     }

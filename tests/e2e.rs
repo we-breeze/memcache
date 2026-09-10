@@ -2,8 +2,8 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use brz_memcache::{CacheService, Memcache};
 use bytes::Bytes;
-use memcache::{CacheService, Memcache};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{TcpListener, TcpStream},
@@ -84,7 +84,7 @@ async fn set_when_connected(cache: &CacheService, key: &str, value: Bytes) -> bo
     loop {
         match cache.set(key, value.clone()).await {
             Ok(result) => return result,
-            Err(memcache::Error::Unavailable) if tokio::time::Instant::now() < deadline => {
+            Err(brz_memcache::Error::Unavailable) if tokio::time::Instant::now() < deadline => {
                 tokio::task::yield_now().await;
             }
             result => return result.unwrap(),
@@ -115,7 +115,7 @@ async fn construction_does_not_wait_for_connection() {
     let cache = CacheService::single(endpoint.to_string()).await.unwrap();
     assert!(matches!(
         cache.get("not-connected").await,
-        Err(memcache::Error::Unavailable)
+        Err(brz_memcache::Error::Unavailable)
     ));
 }
 

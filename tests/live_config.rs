@@ -3,11 +3,11 @@
 mod fixture;
 
 use async_trait::async_trait;
-use bytes::Bytes;
-use memcache::{
+use brz_memcache::{
     CacheNamespaceConf, CacheService, CacheServiceConfigSource, CacheServiceOptions,
     SubscriptionHandle,
 };
+use bytes::Bytes;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
@@ -21,10 +21,10 @@ struct Source {
 }
 #[async_trait]
 impl CacheServiceConfigSource for Source {
-    async fn load(&self) -> memcache::Result<CacheNamespaceConf> {
+    async fn load(&self) -> brz_memcache::Result<CacheNamespaceConf> {
         Ok(self.initial.clone())
     }
-    async fn subscribe(&self, callback: Callback) -> memcache::Result<SubscriptionHandle> {
+    async fn subscribe(&self, callback: Callback) -> brz_memcache::Result<SubscriptionHandle> {
         *self.callback.lock().unwrap() = Some(callback);
         let slot = self.callback.clone();
         let cancelled = self.cancelled.clone();

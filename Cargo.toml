@@ -42,4 +42,4 @@ resolver = "2"
 
 
 [lib]
-name = "memcache"
+name = "brz_memcache"

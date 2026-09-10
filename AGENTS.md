@@ -1,6 +1,6 @@
 # Repository Map
 
-This crate provides the `memcache` library (`brz-memcache` package).
+This crate provides the `brz_memcache` library (`brz-memcache` package).
 
 - `src/api.rs`: CacheService, fixed/live constructors, configuration source contract.
 - `src/cacheservice.rs`: native configuration types and YAML parsing.

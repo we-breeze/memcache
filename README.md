@@ -6,13 +6,13 @@ Connections and protocol sessions use `brz-net`.
 
 ## Fixed configuration
 
-The Rust library name is `memcache`:
+The Rust library name is `brz_memcache`:
 
 ```rust
 use bytes::Bytes;
-use memcache::{CacheNamespaceConf, CacheService, CacheServiceOptions, Memcache};
+use brz_memcache::{CacheNamespaceConf, CacheService, CacheServiceOptions, Memcache};
 
-# async fn example() -> memcache::Result<()> {
+# async fn example() -> brz_memcache::Result<()> {
 let mut config = CacheNamespaceConf::single_master("127.0.0.1:11211".into());
 config.slave = vec!["127.0.0.1:11212".into()];
 let cache = CacheService::new(config, CacheServiceOptions::default()).await?;
@@ -86,3 +86,14 @@ Normal pushes do not publish. Historical tags retain their original package
 metadata; use new release tags for registry packages.
 
 Licensed under MIT OR Apache-2.0.
+
+## Crate naming
+
+The package name is `brz-memcache`; the Rust library name is `brz_memcache`.
+Use `brz_memcache::...` in Rust code. This replaces the previous `memcache`
+library name. Existing explicit dependency aliases remain supported.
+
+```toml
+[dependencies]
+brz-memcache = "0.0.4"
+```

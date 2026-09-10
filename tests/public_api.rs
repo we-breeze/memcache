@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use memcache::{
+use brz_memcache::{
     CacheNamespaceConf, CacheService, CacheServiceConfig, CacheServiceOptions, Memcache,
 };
 
