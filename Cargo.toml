@@ -1,6 +1,6 @@
 [package]
 name = "brz-memcache"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 description = "Asynchronous memcached client with sharding, failover, and live configuration"
 license = "MIT OR Apache-2.0"
