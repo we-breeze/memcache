@@ -1,6 +1,6 @@
 [package]
 name = "brz-memcache"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 description = "Asynchronous memcached client with sharding, failover, and live configuration"
 license = "MIT OR Apache-2.0"
@@ -20,7 +20,7 @@ rand = "0.8"
 async-trait = "0.1"
 futures-util = "0.3.34"
 brz-net = { package = "brz-net", version = "0.0.2" }
-brz-metrics = { package = "brz-metrics", version = "0.0.3", optional = true }
+brz-metrics = { package = "brz-metrics", version = "=0.0.5", optional = true }
 enum_dispatch = "0.3.8"
 itoa = "1"
 
