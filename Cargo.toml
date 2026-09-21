@@ -20,7 +20,7 @@ rand = "0.8"
 async-trait = "0.1"
 futures-util = "0.3.34"
 brz-net = { package = "brz-net", version = "0.0.2" }
-brz-metrics = { package = "brz-metrics", version = "=0.0.5", optional = true }
+brz-metrics = { package = "brz-metrics", version = "=0.0.7", optional = true }
 enum_dispatch = "0.3.8"
 itoa = "1"
 
