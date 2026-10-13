@@ -1,9 +1,9 @@
-//! Feature-gated ProfileUtil-compatible metrics for physical memcached access.
+//! Feature-gated cumulative metrics for physical memcached access.
 
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use brz_metrics::Metric;
+use brz_metrics::{MetricType, ResourceMetric, TimingMetric};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Direction {
@@ -19,9 +19,9 @@ pub(crate) struct ProfileMetrics {
     port_name: Box<str>,
     up_name: Box<str>,
     down_name: Box<str>,
-    aggregate: OnceLock<Metric>,
-    up: OnceLock<Metric>,
-    down: OnceLock<Metric>,
+    aggregate: OnceLock<TimingMetric>,
+    up: OnceLock<TimingMetric>,
+    down: OnceLock<TimingMetric>,
 }
 
 impl ProfileMetrics {
@@ -39,10 +39,16 @@ impl ProfileMetrics {
     /// Starts one physical access without allocation or address lookup.
     #[inline]
     pub(crate) fn attempt(&self, direction: Direction) -> ProfileAttempt {
-        let aggregate = *self.aggregate.get_or_init(|| Metric::mc(&self.port_name));
+        let aggregate = *self.aggregate.get_or_init(|| {
+            TimingMetric::new(MetricType::Memcache(ResourceMetric::Req), &self.port_name)
+        });
         let detail = match direction {
-            Direction::Up => *self.up.get_or_init(|| Metric::mc_detail(&self.up_name)),
-            Direction::Down => *self.down.get_or_init(|| Metric::mc_detail(&self.down_name)),
+            Direction::Up => *self
+                .up
+                .get_or_init(|| TimingMetric::new(MetricType::McDetail, &self.up_name)),
+            Direction::Down => *self
+                .down
+                .get_or_init(|| TimingMetric::new(MetricType::McDetail, &self.down_name)),
         };
         ProfileAttempt {
             metrics: [aggregate, detail],
@@ -57,7 +63,7 @@ impl ProfileMetrics {
 /// intentionally dropped by the caller.
 #[derive(Debug)]
 pub(crate) struct ProfileAttempt {
-    metrics: [Metric; 2],
+    metrics: [TimingMetric; 2],
     started: Instant,
     finished: bool,
 }
@@ -77,6 +83,42 @@ impl Drop for ProfileAttempt {
     fn drop(&mut self) {
         if !self.finished {
             self.finish(false);
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+pub(crate) struct ConnectionObserver {
+    metric: brz_metrics::ConnMetric,
+    active: std::sync::Mutex<Option<brz_metrics::ConnectionGuard>>,
+}
+
+#[cfg(feature = "metrics")]
+impl ConnectionObserver {
+    pub(crate) fn new(port: u16) -> Self {
+        Self {
+            metric: brz_metrics::ConnMetric::new(
+                brz_metrics::MetricType::Memcache(brz_metrics::ResourceMetric::Conn),
+                &port.to_string(),
+            ),
+            active: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+#[cfg(feature = "metrics")]
+impl brz_net::NodeConnectionObserver for ConnectionObserver {
+    fn on_connection_state_change(&self, connected: bool) {
+        let mut active = self
+            .active
+            .lock()
+            .expect("connection metrics mutex poisoned");
+        if connected {
+            if active.is_none() {
+                *active = Some(self.metric.connection());
+            }
+        } else {
+            active.take();
         }
     }
 }

@@ -162,15 +162,27 @@ impl CacheTopology {
                     .cloned()
                     .map(Ok)
                     .unwrap_or_else(|| {
-                        Node::new(
-                            SocketAddr::V4(endpoint),
-                            MemcacheProtocol::new(options.protocol),
-                            NodeOptions {
-                                request_timeout: timeout,
-                                connect_timeout: options.connect_timeout,
-                                ..NodeOptions::default()
-                            },
-                        )
+                        let protocol = MemcacheProtocol::new(options.protocol);
+                        let node_options = NodeOptions {
+                            request_timeout: timeout,
+                            connect_timeout: options.connect_timeout,
+                            ..NodeOptions::default()
+                        };
+                        #[cfg(feature = "metrics")]
+                        {
+                            Node::new_observed(
+                                SocketAddr::V4(endpoint),
+                                protocol,
+                                node_options,
+                                Arc::new(crate::profile_metrics::ConnectionObserver::new(
+                                    endpoint.port(),
+                                )),
+                            )
+                        }
+                        #[cfg(not(feature = "metrics"))]
+                        {
+                            Node::new(SocketAddr::V4(endpoint), protocol, node_options)
+                        }
                     })
                     .map_err(|error| Error::Client(error.to_string()))?;
                 group_nodes.push(node.clone());

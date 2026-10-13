@@ -62,6 +62,17 @@ For legacy YAML, use the discovery parser: the native parser ignores unknown
 fields and does **not** interpret the old `flag` field. Existing sharding
 algorithms, including hash aliases and `fishermen`, remain unchanged.
 
+## Metrics
+
+Enable `metrics` for cumulative physical-access counts and durations through
+`brz-metrics`. Physical connections are aggregated by port across hosts:
+`brz_conn{type="MC",name="11211"}` is the current count, and
+`brz_conn_total{type="MC",name="11211"}` counts successful establishments,
+including reconnects. Reusing a connection or cloning the SDK adds no count.
+Prometheus computes CPS with `rate(brz_conn_total{type="MC"}[1m])`.
+The current count decreases when a connection closes or its driver is dropped;
+scrapes never reset either metric.
+
 ## Validation
 
 ```sh

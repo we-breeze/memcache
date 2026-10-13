@@ -129,6 +129,13 @@ async fn metrics_group_physical_accesses_by_port_and_split_direction() {
 
     assert!(set_when_connected(&cache, "setup", Bytes::from_static(b"value")).await);
     assert!(cache.get("setup").await.unwrap().is_some());
+    let connections = brz_metrics::ConnMetric::new(
+        brz_metrics::MetricType::Memcache(brz_metrics::ResourceMetric::Conn),
+        &port.to_string(),
+    );
+    assert_eq!(connections.current(), 1);
+    assert_eq!(connections.total(), 1);
+    let cloned = cache.clone();
     let before = metric_totals(port);
 
     assert!(
@@ -143,6 +150,27 @@ async fn metrics_group_physical_accesses_by_port_and_split_direction() {
     assert_eq!(after.0 - before.0, 2, "MC counts reads and writes");
     assert_eq!(after.1 - before.1, 1, "MCDETAIL_up counts writes");
     assert_eq!(after.2 - before.2, 1, "MCDETAIL_down counts reads");
+    assert_eq!(connections.current(), 1);
+    assert_eq!(
+        connections.total(),
+        1,
+        "requests and clones reuse the physical connection"
+    );
+    drop(cache);
+    assert_eq!(
+        connections.current(),
+        1,
+        "a surviving clone keeps the connection"
+    );
+    drop(cloned);
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while connections.current() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("connection metrics decrement when the last handle closes");
+    assert_eq!(connections.total(), 1);
 }
 
 #[cfg(feature = "metrics")]
