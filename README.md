@@ -115,5 +115,5 @@ library name. Existing explicit dependency aliases remain supported.
 
 ```toml
 [dependencies]
-brz-memcache = "0.0.10"
+brz-memcache = "0.0.11"
 ```
