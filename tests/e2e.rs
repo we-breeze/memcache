@@ -121,17 +121,21 @@ async fn construction_does_not_wait_for_connection() {
 
 #[cfg(feature = "metrics")]
 #[tokio::test]
-async fn metrics_group_physical_accesses_by_port_and_split_direction() {
+async fn metrics_group_physical_accesses_by_endpoint_and_split_direction() {
     let (port, _) = spawn_text_server().await;
-    let cache = CacheService::single(format!("127.0.0.1:{port}"))
-        .await
-        .unwrap();
+    let cache = CacheService::single_with_options(
+        format!("127.0.0.1:{port}"),
+        brz_memcache::CacheServiceOptions::default().with_resource_name("cache_metrics"),
+    )
+    .await
+    .unwrap();
 
     assert!(set_when_connected(&cache, "setup", Bytes::from_static(b"value")).await);
     assert!(cache.get("setup").await.unwrap().is_some());
-    let connections = brz_metrics::ConnMetric::new(
+    let connections = brz_metrics::ConnMetric::new_resource(
         brz_metrics::MetricType::Memcache(brz_metrics::ResourceMetric::Conn),
-        &port.to_string(),
+        &brz_metrics::ResourceLabels::new("cache_metrics", format!("127.0.0.1:{port}"))
+            .with_role(brz_metrics::ConnectionRole::Shared),
     );
     assert_eq!(connections.current(), 1);
     assert_eq!(connections.total(), 1);
@@ -148,8 +152,8 @@ async fn metrics_group_physical_accesses_by_port_and_split_direction() {
     let after = metric_totals(port);
 
     assert_eq!(after.0 - before.0, 2, "MC counts reads and writes");
-    assert_eq!(after.1 - before.1, 1, "MCDETAIL_up counts writes");
-    assert_eq!(after.2 - before.2, 1, "MCDETAIL_down counts reads");
+    assert_eq!(after.1 - before.1, 1, "write access counts writes");
+    assert_eq!(after.2 - before.2, 1, "read access counts reads");
     assert_eq!(connections.current(), 1);
     assert_eq!(
         connections.total(),
@@ -175,15 +179,15 @@ async fn metrics_group_physical_accesses_by_port_and_split_direction() {
 
 #[cfg(feature = "metrics")]
 fn metric_totals(port: u16) -> (u64, u64, u64) {
-    let port = port.to_string();
-    let up = format!("{port}_up");
-    let down = format!("{port}_down");
-    let mut totals = (0, 0, 0);
-    brz_metrics::visit(|name, metric_type, snapshot| match metric_type {
-        "MC" if name == port => totals.0 = snapshot.total,
-        "MCDETAIL" if name == up => totals.1 = snapshot.total,
-        "MCDETAIL" if name == down => totals.2 = snapshot.total,
-        _ => {}
-    });
-    totals
+    use brz_metrics::{MetricAccess, MetricType, ResourceLabels, ResourceMetric, TimingMetric};
+    let endpoint = format!("127.0.0.1:{port}");
+    let labels = ResourceLabels::new("cache_metrics", endpoint);
+    let kind = MetricType::Memcache(ResourceMetric::Req);
+    let read = TimingMetric::new_resource(kind, &labels.clone().with_access(MetricAccess::Read))
+        .snapshot()
+        .total;
+    let write = TimingMetric::new_resource(kind, &labels.with_access(MetricAccess::Write))
+        .snapshot()
+        .total;
+    (read + write, write, read)
 }

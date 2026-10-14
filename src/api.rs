@@ -131,8 +131,10 @@ impl Drop for SubscriptionHandle {
 }
 
 /// Instance-level settings for [`CacheService`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheServiceOptions {
+    /// Business resource name; defaults to each configured endpoint.
+    pub resource_name: Option<Arc<str>>,
     /// Expiration used when [`SetOptions::expiration`] is `None`.
     pub default_expiration: Expiration,
     /// Wire protocol used by the topology built by [`CacheService`].
@@ -155,6 +157,7 @@ pub struct CacheServiceOptions {
 impl Default for CacheServiceOptions {
     fn default() -> Self {
         Self {
+            resource_name: None,
             default_expiration: Expiration::default(),
             protocol: Protocol::Text,
             master_timeout: Duration::from_millis(100),
@@ -168,6 +171,12 @@ impl Default for CacheServiceOptions {
 }
 
 impl CacheServiceOptions {
+    #[must_use]
+    pub fn with_resource_name(mut self, name: impl Into<Arc<str>>) -> Self {
+        self.resource_name = Some(name.into());
+        self
+    }
+
     /// Creates options with an explicit default expiration.
     pub fn new(default_expiration: Expiration) -> Self {
         Self {
@@ -292,7 +301,7 @@ impl CacheService {
     /// backend never changes — use [`CacheService::new_live`] for a backend
     /// that hot-swaps on config change.
     pub async fn new(conf: CacheNamespaceConf, options: CacheServiceOptions) -> Result<Self> {
-        let backend = Self::build_backend(&conf, options, None)?;
+        let backend = Self::build_backend(&conf, &options, None)?;
         Ok(Self {
             backend: Arc::new(ArcSwapAny::new(Arc::new(backend))),
             options,
@@ -310,11 +319,14 @@ impl CacheService {
         options: CacheServiceOptions,
     ) -> Result<Self> {
         let initial = source.load().await?;
-        let backend = Self::build_backend(&initial, options, None)?;
+        let backend = Self::build_backend(&initial, &options, None)?;
         let backend_slot = Arc::new(ArcSwapAny::new(Arc::new(backend)));
 
-        let inner =
-            crate::service::live::CacheServiceInner::new(initial, backend_slot.clone(), options);
+        let inner = crate::service::live::CacheServiceInner::new(
+            initial,
+            backend_slot.clone(),
+            options.clone(),
+        );
         let inner_for_cb = inner.clone();
         let on_update: Arc<dyn Fn(CacheNamespaceConf) + Send + Sync> = Arc::new(move |conf| {
             if let Err(error) = inner_for_cb.apply(conf) {
@@ -345,7 +357,7 @@ impl CacheService {
 
     pub(crate) fn build_backend(
         conf: &CacheNamespaceConf,
-        options: CacheServiceOptions,
+        options: &CacheServiceOptions,
         previous: Option<&CacheTopology>,
     ) -> Result<BackendSlot> {
         Ok(BackendSlot::Net(CacheTopology::from_namespace_conf(

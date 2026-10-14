@@ -38,16 +38,47 @@ struct NodeKey {
     endpoint: SocketAddrV4,
     binary: bool,
     request_timeout: Duration,
+    #[cfg(feature = "metrics")]
+    labels: brz_metrics::ResourceLabels,
+}
+
+struct ProfiledNode {
+    node: Node<MemcacheProtocol>,
+    #[cfg(feature = "metrics")]
+    metrics: ProfileMetrics,
+}
+impl ProfiledNode {
+    #[inline]
+    fn request(
+        &self,
+        request: MemcacheRequest,
+    ) -> std::result::Result<
+        brz_net::ResponseFuture<
+            std::result::Result<MemcacheResponse, brz_net::SessionError<Error>>,
+        >,
+        brz_net::SessionError<Error>,
+    > {
+        #[cfg(feature = "metrics")]
+        let request = {
+            let direction = if request.is_read() {
+                Direction::Down
+            } else {
+                Direction::Up
+            };
+            request.with_profile_attempt(self.metrics.attempt(direction))
+        };
+        self.node.request(request)
+    }
 }
 
 struct ShardGroup {
     sharding: Sharding,
-    nodes: Arc<[Node<MemcacheProtocol>]>,
+    nodes: Arc<[ProfiledNode]>,
 }
 
 impl ShardGroup {
     #[inline]
-    fn node(&self, key: &str) -> &Node<MemcacheProtocol> {
+    fn node(&self, key: &str) -> &ProfiledNode {
         let index = if self.nodes.len() == 1 {
             0
         } else {
@@ -101,8 +132,6 @@ pub(crate) struct CacheTopology {
     writeback_expiration: Expiration,
     backend_no_storage: bool,
     nodes: HashMap<NodeKey, Node<MemcacheProtocol>>,
-    #[cfg(feature = "metrics")]
-    profile_metrics: ProfileMetrics,
 }
 
 impl std::fmt::Debug for CacheTopology {
@@ -119,7 +148,7 @@ impl std::fmt::Debug for CacheTopology {
 impl CacheTopology {
     pub(crate) fn from_namespace_conf(
         conf: &CacheNamespaceConf,
-        options: CacheServiceOptions,
+        options: &CacheServiceOptions,
         previous: Option<&Self>,
     ) -> Result<Self> {
         let (specs, local_len, writer_indices) = group_specs(conf, options.update_master_l1)?;
@@ -129,8 +158,6 @@ impl CacheTopology {
         let slave_timeout = configured_timeout(conf.timeout_ms_slave(), options.slave_timeout);
         let mut nodes = HashMap::new();
         let mut groups = Vec::with_capacity(specs.len());
-        #[cfg(feature = "metrics")]
-        let mut profile_port = None;
 
         for (group_index, endpoints) in specs.iter().enumerate() {
             let timeout = if group_index == 0 {
@@ -147,15 +174,28 @@ impl CacheTopology {
                     ))
                 })?;
                 #[cfg(feature = "metrics")]
-                if profile_port.is_none() {
-                    profile_port = Some(endpoint.port());
-                }
+                let labels = {
+                    let endpoint: Arc<str> = Arc::from(endpoint.to_string());
+                    brz_metrics::ResourceLabels::new(
+                        options
+                            .resource_name
+                            .clone()
+                            .unwrap_or_else(|| endpoint.clone()),
+                        endpoint,
+                    )
+                };
+                #[cfg(feature = "metrics")]
+                let connection_labels = labels
+                    .clone()
+                    .with_role(brz_metrics::ConnectionRole::Shared);
                 let key = NodeKey {
                     group: group_key.clone(),
                     shard_index,
                     endpoint,
                     binary: options.protocol == Protocol::Binary,
                     request_timeout: timeout,
+                    #[cfg(feature = "metrics")]
+                    labels: connection_labels.clone(),
                 };
                 let node = previous
                     .and_then(|topology| topology.nodes.get(&key))
@@ -175,7 +215,7 @@ impl CacheTopology {
                                 protocol,
                                 node_options,
                                 Arc::new(crate::profile_metrics::ConnectionObserver::new(
-                                    endpoint.port(),
+                                    &connection_labels,
                                 )),
                             )
                         }
@@ -185,7 +225,11 @@ impl CacheTopology {
                         }
                     })
                     .map_err(|error| Error::Client(error.to_string()))?;
-                group_nodes.push(node.clone());
+                group_nodes.push(ProfiledNode {
+                    node: node.clone(),
+                    #[cfg(feature = "metrics")]
+                    metrics: ProfileMetrics::new(&labels),
+                });
                 nodes.insert(key, node);
             }
             groups.push(ShardGroup {
@@ -219,10 +263,6 @@ impl CacheTopology {
         let writeback_ms = conf.writeback_expiration_ms().max(0) as u64;
         let writeback_expiration =
             Expiration::from((writeback_ms / 1_000).min(u64::from(u32::MAX)) as u32);
-        #[cfg(feature = "metrics")]
-        let profile_metrics = ProfileMetrics::new(
-            profile_port.expect("validated cache-service master group has one endpoint"),
-        );
         Ok(Self {
             groups: groups.into(),
             local_len,
@@ -231,20 +271,7 @@ impl CacheTopology {
             writeback_expiration,
             backend_no_storage: conf.backend_no_storage(),
             nodes,
-            #[cfg(feature = "metrics")]
-            profile_metrics,
         })
-    }
-
-    #[cfg(feature = "metrics")]
-    #[inline]
-    fn attach_profile(&self, request: MemcacheRequest) -> MemcacheRequest {
-        let direction = if request.is_read() {
-            Direction::Down
-        } else {
-            Direction::Up
-        };
-        request.with_profile_attempt(self.profile_metrics.attempt(direction))
     }
 
     async fn request_at(
@@ -254,8 +281,6 @@ impl CacheTopology {
         request: MemcacheRequest,
         quota: Option<QuotaTicket>,
     ) -> Result<MemcacheResponse> {
-        #[cfg(feature = "metrics")]
-        let request = self.attach_profile(request);
         let future = match self.groups[group_index].node(key).request(request) {
             Ok(future) => future,
             Err(error) => {
@@ -343,8 +368,6 @@ impl CacheTopology {
         // Dropping the future does not cancel the admitted request. The node
         // continues decoding its response and releases the completion slot,
         // avoiding one spawned task per propagated write.
-        #[cfg(feature = "metrics")]
-        let request = self.attach_profile(request);
         let _ = self.groups[group_index].node(key).request(request);
     }
 

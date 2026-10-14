@@ -1,9 +1,8 @@
 //! Feature-gated cumulative metrics for physical memcached access.
 
-use std::sync::OnceLock;
 use std::time::Instant;
 
-use brz_metrics::{MetricType, ResourceMetric, TimingMetric};
+use brz_metrics::{MetricAccess, MetricType, ResourceLabels, ResourceMetric, TimingMetric};
 
 #[derive(Clone, Copy)]
 pub(crate) enum Direction {
@@ -11,47 +10,32 @@ pub(crate) enum Direction {
     Down,
 }
 
-/// Metrics shared by every physical node in one cache-service topology.
-///
-/// CacheService guarantees that all nodes for one business group use the
-/// same port, so names are derived once from the first configured endpoint.
+/// Eagerly registered handles for one business resource and physical endpoint.
+#[derive(Clone, Copy)]
 pub(crate) struct ProfileMetrics {
-    port_name: Box<str>,
-    up_name: Box<str>,
-    down_name: Box<str>,
-    aggregate: OnceLock<TimingMetric>,
-    up: OnceLock<TimingMetric>,
-    down: OnceLock<TimingMetric>,
+    read: TimingMetric,
+    write: TimingMetric,
 }
 
 impl ProfileMetrics {
-    pub(crate) fn new(port: u16) -> Self {
+    pub(crate) fn new(labels: &ResourceLabels) -> Self {
+        let kind = MetricType::Memcache(ResourceMetric::Req);
         Self {
-            port_name: port.to_string().into_boxed_str(),
-            up_name: format!("{port}_up").into_boxed_str(),
-            down_name: format!("{port}_down").into_boxed_str(),
-            aggregate: OnceLock::new(),
-            up: OnceLock::new(),
-            down: OnceLock::new(),
+            read: TimingMetric::new_resource(kind, &labels.clone().with_access(MetricAccess::Read)),
+            write: TimingMetric::new_resource(
+                kind,
+                &labels.clone().with_access(MetricAccess::Write),
+            ),
         }
     }
 
-    /// Starts one physical access without allocation or address lookup.
     #[inline]
     pub(crate) fn attempt(&self, direction: Direction) -> ProfileAttempt {
-        let aggregate = *self.aggregate.get_or_init(|| {
-            TimingMetric::new(MetricType::Memcache(ResourceMetric::Req), &self.port_name)
-        });
-        let detail = match direction {
-            Direction::Up => *self
-                .up
-                .get_or_init(|| TimingMetric::new(MetricType::McDetail, &self.up_name)),
-            Direction::Down => *self
-                .down
-                .get_or_init(|| TimingMetric::new(MetricType::McDetail, &self.down_name)),
-        };
         ProfileAttempt {
-            metrics: [aggregate, detail],
+            metric: match direction {
+                Direction::Up => self.write,
+                Direction::Down => self.read,
+            },
             started: Instant::now(),
             finished: false,
         }
@@ -63,7 +47,7 @@ impl ProfileMetrics {
 /// intentionally dropped by the caller.
 #[derive(Debug)]
 pub(crate) struct ProfileAttempt {
-    metrics: [TimingMetric; 2],
+    metric: TimingMetric,
     started: Instant,
     finished: bool,
 }
@@ -72,9 +56,7 @@ impl ProfileAttempt {
     #[inline]
     pub(crate) fn finish(&mut self, success: bool) {
         let elapsed = self.started.elapsed();
-        for metric in self.metrics {
-            metric.record(elapsed, success);
-        }
+        self.metric.record(elapsed, success);
         self.finished = true;
     }
 }
@@ -95,11 +77,11 @@ pub(crate) struct ConnectionObserver {
 
 #[cfg(feature = "metrics")]
 impl ConnectionObserver {
-    pub(crate) fn new(port: u16) -> Self {
+    pub(crate) fn new(labels: &ResourceLabels) -> Self {
         Self {
-            metric: brz_metrics::ConnMetric::new(
+            metric: brz_metrics::ConnMetric::new_resource(
                 brz_metrics::MetricType::Memcache(brz_metrics::ResourceMetric::Conn),
-                &port.to_string(),
+                labels,
             ),
             active: std::sync::Mutex::new(None),
         }

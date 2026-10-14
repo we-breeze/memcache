@@ -64,14 +64,23 @@ algorithms, including hash aliases and `fishermen`, remain unchanged.
 
 ## Metrics
 
-Enable `metrics` for cumulative physical-access counts and durations through
-`brz-metrics`. Physical connections are aggregated by port across hosts:
-`brz_conn{type="MC",name="11211"}` is the current count, and
-`brz_conn_total{type="MC",name="11211"}` counts successful establishments,
-including reconnects. Reusing a connection or cloning the SDK adds no count.
-Prometheus computes CPS with `rate(brz_conn_total{type="MC"}[1m])`.
-The current count decreases when a connection closes or its driver is dropped;
-scrapes never reset either metric.
+Enable `metrics` for cumulative physical-access counts, failures, slow requests,
+and duration sums through `brz-metrics`. Configure a business resource name with
+`CacheServiceOptions::default().with_resource_name("backend")`.
+The default name is the configured `host:port`. Labels separate `type="MC"`,
+`name`, `endpoint`, and request `access="read"` / `"write"`.
+Reads, writes, fanout and backfill are attributed to the selected physical endpoint. Backfill counts as write.
+
+Connection metrics use `role="shared"`
+for the single connection shared by reads and writes.
+`brz_conn` is the current connection count; `brz_conn_total` counts successful
+establishments including reconnects. SDK clones and connection reuse do not
+increment the total. Compute CPS with `rate(brz_conn_total{type="MC"}[1m])`.
+
+Registration happens during construction/topology rebuild. Request metric
+updates use cached Copy handles, clocks and atomics; they allocate no label strings
+and perform no registry lookup, including the first request. Total request counts
+are obtained by summing access labels rather than recording a second aggregate.
 
 ## Validation
 
@@ -106,5 +115,5 @@ library name. Existing explicit dependency aliases remain supported.
 
 ```toml
 [dependencies]
-brz-memcache = "0.0.9"
+brz-memcache = "0.0.10"
 ```

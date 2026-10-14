@@ -61,7 +61,7 @@ impl CacheServiceInner {
         }
 
         let current = self.backend.load_full();
-        let backend = crate::CacheService::build_backend(&next, self.options, current.topology())?;
+        let backend = crate::CacheService::build_backend(&next, &self.options, current.topology())?;
         // Build succeeded → atomic swap.
         self.backend.store(Arc::new(backend));
         self.applied.store(Arc::new(next));
